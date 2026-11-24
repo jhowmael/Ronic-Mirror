@@ -93,6 +93,27 @@ internal sealed class SourceClient : IDisposable
         finally { _sendLock.Release(); }
     }
 
+    /// <summary>Posição do cursor: envia na hora se o canal estiver livre (senão a próxima atualização cobre).</summary>
+    public void TrySendImmediate(byte[] data)
+    {
+        var ws = _ws;
+        if (ws == null || ws.State != WebSocketState.Open || !_sendLock.Wait(0)) return;
+        try { ws.SendAsync(data, WebSocketMessageType.Binary, true, _cts.Token).GetAwaiter().GetResult(); }
+        catch { }
+        finally { _sendLock.Release(); }
+    }
+
+    /// <summary>Mensagem binária que não pode se perder (ex.: imagem do cursor).</summary>
+    public async Task SendBinaryAsync(byte[] data)
+    {
+        var ws = _ws;
+        if (ws == null || ws.State != WebSocketState.Open) return;
+        await _sendLock.WaitAsync();
+        try { await ws.SendAsync(data, WebSocketMessageType.Binary, true, _cts.Token); }
+        catch { }
+        finally { _sendLock.Release(); }
+    }
+
     public async Task SendJsonAsync(object payload)
     {
         var ws = _ws;

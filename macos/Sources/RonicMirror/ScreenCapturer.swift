@@ -72,7 +72,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
         c.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
         c.pixelFormat = kCVPixelFormatType_32BGRA
         c.colorSpaceName = CGColorSpace.sRGB
-        c.showsCursor = true
+        c.showsCursor = false // o cursor vai separado (CursorStreamer), sem o atraso do vídeo
         c.queueDepth = 6
         return c
     }

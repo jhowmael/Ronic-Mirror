@@ -81,6 +81,14 @@ final class SourceClient: NSObject, URLSessionWebSocketDelegate {
         }
     }
 
+    /// Mensagens pequenas e urgentes (cursor): vão direto, sem esperar a fila de vídeo. Thread-safe.
+    func sendImmediate(_ data: Data) {
+        lock.lock()
+        let t = isOpen ? task : nil
+        lock.unlock()
+        t?.send(.data(data)) { _ in }
+    }
+
     /// JPEG: envia só se não houver outro em trânsito (latest-frame-wins). Thread-safe.
     func sendFrame(_ data: Data) {
         lock.lock()

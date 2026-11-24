@@ -15,13 +15,15 @@
 </head>
 <body>
   <canvas id="screen" aria-label="Tela estendida"></canvas>
+  <img id="cursor" alt="" hidden>
 
   <div id="overlay" role="button" tabindex="0">
     <div class="card">
       <img class="logo" src="logo.png" alt="" width="88" height="88">
       <h1>Ronic Mirror</h1>
       <p id="status">Conectando…</p>
-      <p class="hint">Toque para entrar em tela cheia</p>
+      <p class="hint" id="hint">Toque para entrar em tela cheia</p>
+      <button id="retry" type="button" hidden>Pedir acesso novamente</button>
       <p class="tip">Dica: para tirar as barras do navegador, adicione à Tela de Início (Safari: Compartilhar → Adicionar à Tela de Início · Chrome: ⋮ → Adicionar à tela inicial).</p>
     </div>
   </div>

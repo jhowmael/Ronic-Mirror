@@ -87,8 +87,8 @@ internal sealed class ScreenCapturer : IDisposable
 
                 using (var g = Graphics.FromImage(bmp))
                 {
+                    // O cursor NÃO vai no vídeo: o CursorStreamer manda a posição separada, sem atraso.
                     g.CopyFromScreen(b.X, b.Y, 0, 0, b.Size, CopyPixelOperation.SourceCopy);
-                    DrawCursor(g, b);
                 }
 
                 var data = bmp.LockBits(new Rectangle(0, 0, bmp.Width, bmp.Height), ImageLockMode.ReadOnly, bmp.PixelFormat);
@@ -181,30 +181,6 @@ internal sealed class ScreenCapturer : IDisposable
             {
                 if (_free.Count < 3) _free.Push(buf);
             }
-        }
-    }
-
-    private static void DrawCursor(Graphics g, Rectangle bounds)
-    {
-        var ci = new CURSORINFO { cbSize = Marshal.SizeOf<CURSORINFO>() };
-        if (!GetCursorInfo(ref ci) || (ci.flags & CURSOR_SHOWING) == 0 || ci.hCursor == IntPtr.Zero) return;
-        if (!bounds.Contains(ci.ptScreenPos.X, ci.ptScreenPos.Y)) return;
-
-        int hx = 0, hy = 0;
-        if (GetIconInfo(ci.hCursor, out var info))
-        {
-            hx = info.xHotspot; hy = info.yHotspot;
-            if (info.hbmMask != IntPtr.Zero) DeleteObject(info.hbmMask);
-            if (info.hbmColor != IntPtr.Zero) DeleteObject(info.hbmColor);
-        }
-        IntPtr hdc = g.GetHdc();
-        try
-        {
-            DrawIconEx(hdc, ci.ptScreenPos.X - bounds.X - hx, ci.ptScreenPos.Y - bounds.Y - hy, ci.hCursor, 0, 0, 0, IntPtr.Zero, DI_NORMAL);
-        }
-        finally
-        {
-            g.ReleaseHdc(hdc);
         }
     }
 }

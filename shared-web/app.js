@@ -10,10 +10,15 @@
   const overlay = document.getElementById("overlay");
   const statusEl = document.getElementById("status");
   const badge = document.getElementById("badge");
+  const cursorEl = document.getElementById("cursor");
+  const hintEl = document.getElementById("hint");
+  const retryBtn = document.getElementById("retry");
 
   const FRAME_H264_CONFIG = 0x10;
   const FRAME_H264_KEY = 0x11;
   const FRAME_H264_DELTA = 0x12;
+  const FRAME_CURSOR_POS = 0x20;
+  const FRAME_CURSOR_IMG = 0x21;
   const FRAME_JPEG = 0xff;
 
   let ws = null;
@@ -22,6 +27,41 @@
   let userDismissed = false;
   let wakeLock = null;
   let h264Supported = false; // definido por probeH264() antes de conectar
+  let authState = "pending"; // pending | accepted | rejected | kicked | blocked
+  let stopReconnect = false;
+
+  // ---------- Identificação do aparelho (para o computador autorizar/bloquear) ----------
+
+  function deviceId() {
+    const key = "ronic-mirror-device-id";
+    try {
+      let id = localStorage.getItem(key);
+      if (!id) {
+        id = (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + Math.random().toString(36).slice(2));
+        localStorage.setItem(key, id);
+      }
+      return id;
+    } catch {
+      return "";
+    }
+  }
+
+  function deviceName() {
+    const ua = navigator.userAgent;
+    let device = "Aparelho";
+    if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) device = "iPad";
+    else if (/iPhone/.test(ua)) device = "iPhone";
+    else if (/Android/.test(ua)) device = /Mobile/.test(ua) ? "Celular Android" : "Tablet Android";
+    else if (/Windows/.test(ua)) device = "PC Windows";
+    else if (/Macintosh/.test(ua)) device = "Mac";
+    else if (/Linux/.test(ua)) device = "Linux";
+    let browser = "";
+    if (/EdgA?\//.test(ua)) browser = "Edge";
+    else if (/CriOS|Chrome\//.test(ua)) browser = "Chrome";
+    else if (/FxiOS|Firefox\//.test(ua)) browser = "Firefox";
+    else if (/Safari\//.test(ua)) browser = "Safari";
+    return browser ? `${device} (${browser})` : device;
+  }
 
   // ---------- Status / overlay ----------
 
@@ -32,7 +72,7 @@
   }
 
   function updateOverlay() {
-    const streaming = ws && ws.readyState === WebSocket.OPEN && sourceConnected && receivedFrame;
+    const streaming = ws && ws.readyState === WebSocket.OPEN && sourceConnected && receivedFrame && authState === "accepted";
     overlay.classList.toggle("hidden", streaming && userDismissed);
   }
 
@@ -40,6 +80,7 @@
     if (!receivedFrame) {
       receivedFrame = true;
       setStatus("Transmitindo", "ok");
+      moveCursor();
     }
   }
 
@@ -65,7 +106,11 @@
 
   function sendResolution(type) {
     const msg = Object.assign({ type }, screenSize());
-    if (type === "hello") msg.codecs = h264Supported ? ["h264", "jpeg"] : ["jpeg"];
+    if (type === "hello") {
+      msg.codecs = h264Supported ? ["h264", "jpeg"] : ["jpeg"];
+      msg.deviceId = deviceId();
+      msg.deviceName = deviceName();
+    }
     send(msg);
   }
 
@@ -90,6 +135,61 @@
     canvas.style.height = h + "px";
     canvas.style.left = Math.round((vw - w) / 2) + "px";
     canvas.style.top = Math.round((vh - h) / 2) + "px";
+    canvasRect = { left: Math.round((vw - w) / 2), top: Math.round((vh - h) / 2), width: w, height: h };
+    applyCursorSize();
+    moveCursor();
+  }
+
+  // ---------- Cursor desenhado no aparelho (latência mínima, fora do vídeo) ----------
+
+  let canvasRect = { left: 0, top: 0, width: 0, height: 0 };
+  // Seta padrão até o computador mandar o formato real do cursor.
+  const DEFAULT_CURSOR = "data:image/svg+xml," + encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" width="17" height="25" viewBox="0 0 17 25">' +
+    '<path d="M1 1v20l5-5 3.5 8 3-1.3-3.4-7.7H16z" fill="#000" stroke="#fff" stroke-width="1.4" stroke-linejoin="round"/></svg>');
+  let cursorShape = { w: 17, h: 25, hx: 1, hy: 1, url: DEFAULT_CURSOR };
+  cursorEl.src = DEFAULT_CURSOR;
+  let cursorPos = { x: 0, y: 0, visible: false };
+
+  function cssScale() {
+    return canvas.width ? canvasRect.width / canvas.width : 1;
+  }
+
+  function applyCursorSize() {
+    if (!cursorShape.url) return;
+    const s = cssScale();
+    cursorEl.style.width = cursorShape.w * s + "px";
+    cursorEl.style.height = cursorShape.h * s + "px";
+  }
+
+  function moveCursor() {
+    const show = cursorPos.visible && !!cursorShape.url && receivedFrame && authState === "accepted";
+    cursorEl.hidden = !show;
+    if (!show) return;
+    const s = cssScale();
+    const x = canvasRect.left + cursorPos.x * canvasRect.width - cursorShape.hx * s;
+    const y = canvasRect.top + cursorPos.y * canvasRect.height - cursorShape.hy * s;
+    cursorEl.style.transform = `translate3d(${x}px, ${y}px, 0)`;
+  }
+
+  function handleCursorPos(buf) {
+    const dv = new DataView(buf);
+    cursorPos = { x: dv.getFloat32(1, true), y: dv.getFloat32(5, true), visible: dv.getUint8(9) === 1 };
+    moveCursor();
+  }
+
+  function handleCursorImg(buf) {
+    const dv = new DataView(buf);
+    const w = dv.getFloat32(1, true), h = dv.getFloat32(5, true);
+    const hx = dv.getFloat32(9, true), hy = dv.getFloat32(13, true);
+    const url = URL.createObjectURL(new Blob([new Uint8Array(buf, 17)], { type: "image/png" }));
+    cursorEl.onload = () => {
+      if (cursorShape.url && cursorShape.url.startsWith("blob:")) URL.revokeObjectURL(cursorShape.url);
+      cursorShape = { w, h, hx, hy, url };
+      applyCursorSize();
+      moveCursor();
+    };
+    cursorEl.src = url;
   }
 
   function drawSource(source, width, height) {
@@ -229,6 +329,12 @@
     bytes += buf.byteLength;
     const u8 = new Uint8Array(buf);
     switch (u8[0]) {
+      case FRAME_CURSOR_POS:
+        handleCursorPos(buf);
+        return;
+      case FRAME_CURSOR_IMG:
+        handleCursorImg(buf);
+        return;
       case FRAME_JPEG:
         enqueueJpeg(buf);
         break;
@@ -253,6 +359,7 @@
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
+      authState = "pending";
       setStatus("Conectado. Aguardando o computador…", "warn");
       needKey = true;
       sendResolution("hello");
@@ -265,11 +372,17 @@
       }
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.type === "auth") {
+        handleAuth(msg.state);
+        return;
+      }
       if (msg.type === "source") {
         sourceConnected = !!msg.connected;
         if (!sourceConnected) {
           receivedFrame = false;
           setStatus("Computador desconectado. Aguardando…", "warn");
+        } else if (authState === "pending") {
+          setStatus("Aguardando autorização no computador…", "warn");
         } else {
           needKey = true;
           setStatus(receivedFrame ? "Transmitindo" : "Computador conectado. Aguardando imagem…", "ok");
@@ -280,12 +393,48 @@
     ws.onclose = () => {
       sourceConnected = false;
       receivedFrame = false;
+      moveCursor();
+      if (stopReconnect) return; // recusado, desconectado ou bloqueado pelo computador
       setStatus("Sem conexão. Tentando novamente…", "warn");
       setTimeout(connect, 1000);
     };
 
     ws.onerror = () => { try { ws.close(); } catch {} };
   }
+
+  function handleAuth(state) {
+    authState = state;
+    const messages = {
+      pending: ["Aguardando autorização no computador… Clique em Aceitar no Ronic Mirror.", "warn"],
+      rejected: ["O computador recusou a conexão.", "bad"],
+      kicked: ["O computador desconectou este aparelho.", "bad"],
+      blocked: ["Este aparelho foi bloqueado no computador.", "bad"],
+    };
+    if (state === "accepted") {
+      setStatus(receivedFrame ? "Transmitindo" : "Autorizado. Aguardando imagem…", "ok");
+      sendResolution("resize");
+    } else if (messages[state]) {
+      setStatus(messages[state][0], messages[state][1]);
+    }
+    const ended = state === "rejected" || state === "kicked" || state === "blocked";
+    stopReconnect = ended;
+    retryBtn.hidden = !(state === "rejected" || state === "kicked");
+    hintEl.hidden = ended;
+    if (ended) {
+      receivedFrame = false;
+      userDismissed = false;
+      overlay.classList.remove("hidden");
+    }
+    moveCursor();
+  }
+
+  retryBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    stopReconnect = false;
+    retryBtn.hidden = true;
+    hintEl.hidden = false;
+    connect();
+  });
 
   // ---------- Tela cheia + manter a tela acesa ----------
 

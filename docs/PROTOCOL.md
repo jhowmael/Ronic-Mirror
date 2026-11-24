@@ -47,6 +47,8 @@ core-server --port 3000 --web <pasta-do-cliente-web> --exit-on-stdin-close
 | `0x10` | `0x10` + **avcC** (AVCDecoderConfigurationRecord do H.264) | Envie **antes de todo quadro-chave**. |
 | `0x11` | `0x11` + timestamp em µs (8 bytes, big-endian) + NALs em formato **AVCC** (prefixo de 4 bytes) | Quadro-chave H.264 |
 | `0x12` | Igual ao `0x11` | Quadro delta H.264. **Nunca descarte deltas.** Se precisar descartar, descarte tudo até o próximo quadro-chave. |
+| `0x20` | `0x20` + x, y (float32 LE, de 0 a 1 dentro da tela virtual) + visível (u8) | **Posição do cursor**, fora do vídeo: até 120×/s, só quando muda. O vídeo é capturado **sem** cursor, e o aparelho desenha o ponteiro sozinho, sem o atraso de compressão e decodificação. |
+| `0x21` | `0x21` + largura, altura, hotspot X, hotspot Y (float32 LE, nas unidades da tela virtual) + PNG | **Formato do cursor**, enviado quando muda (seta, mão, texto…). O PNG pode ter mais pixels que a largura/altura (2×, para Retina). |
 
 Tamanho máximo de 64 MB por mensagem. O H.264 deve ser gerado **sem B-frames**, em tempo real (baixa latência).
 
@@ -56,6 +58,8 @@ Tamanho máximo de 64 MB por mensagem. O H.264 deve ser gerado **sem B-frames**,
 |---|---|
 | `{"type":"hello","role":"source","platform":"macos"\|"windows","version":"…"}` | Informativo |
 | `{"type":"stream-info","codec":"h264"\|"jpeg","width":1366,"height":1024,"fps":60}` | Envie ao conectar e quando a resolução ou o codec mudar. Repassado aos viewers. |
+| `{"type":"policy","requireApproval":true,"trusted":["<deviceId>"],"blockedIds":["<deviceId>"],"blockedIps":["192.168.1.20"]}` | **Envie ao conectar** e sempre que as listas mudarem. O app nativo guarda as listas; o servidor só aplica. Enquanto a política não chega, todo aparelho novo fica aguardando. |
+| `{"type":"device-action","conn":"d3","action":"accept"\|"reject"\|"kick"\|"block"}` | Aceitar um aparelho que aguarda, recusar, desconectar ou bloquear (por deviceId **e** IP). |
 
 ### Servidor → fonte
 
@@ -64,6 +68,7 @@ Tamanho máximo de 64 MB por mensagem. O H.264 deve ser gerado **sem B-frames**,
 | `{"type":"server-info","version":"…","port":3000,"urls":["http://…"]}` | Logo ao conectar |
 | `{"type":"viewers","count":1,"h264":true}` | Ao conectar e quando um viewer entra, sai ou muda de codec. `h264` é `true` quando **todos** os viewers decodificam H.264. Nesse caso a fonte deve usar H.264; caso contrário, JPEG. |
 | `{"type":"keyframe-request"}` | Um viewer novo entrou ou ficou para trás. Gere um quadro-chave (H.264) ou reenvie a tela atual (JPEG). |
+| `{"type":"devices","devices":[{"conn":"d3","deviceId":"…","name":"iPad (Safari)","ip":"192.168.1.20","state":"pending"\|"active","since":1764000000000,"codec":"h264","width":1180,"height":820}]}` | Sempre que um aparelho entra, sai, muda de estado ou de resolução. `state: "pending"` = aguardando você aceitar. |
 | `{"type":"viewer-resolution","width":1180,"height":820,"dpr":2}` | Quando um viewer conecta ou gira. São **pontos CSS** já na orientação atual. A fonte deve ajustar o monitor virtual para `width×height`. |
 
 Uma fonte que só sabe JPEG (como a do Windows hoje) funciona normalmente: ela ignora `h264` e manda `0xFF`.
@@ -74,7 +79,7 @@ Uma fonte que só sabe JPEG (como a do Windows hoje) funciona normalmente: ela i
 
 | Mensagem | |
 |---|---|
-| `{"type":"hello","width":1180,"height":820,"dpr":2,"codecs":["h264","jpeg"]}` | Ao conectar. Inclua `"h264"` só se `VideoDecoder.isConfigSupported` confirmar o suporte. |
+| `{"type":"hello","width":1180,"height":820,"dpr":2,"codecs":["h264","jpeg"],"deviceId":"<uuid salvo no navegador>","deviceName":"iPad (Safari)"}` | Ao conectar. Inclua `"h264"` só se `VideoDecoder.isConfigSupported` confirmar o suporte. O `deviceId` identifica o aparelho para "confiar" e "bloquear". |
 | `{"type":"resize","width":…,"height":…,"dpr":…}` | Quando a tela gira ou muda de tamanho. Valores fora de 320…8192 são ignorados. |
 | `{"type":"codecs","codecs":["jpeg"]}` | O decodificador H.264 falhou: volta para JPEG. |
 | `{"type":"keyframe-request"}` | O viewer perdeu frames ou ficou para trás. |
@@ -83,6 +88,7 @@ Uma fonte que só sabe JPEG (como a do Windows hoje) funciona normalmente: ela i
 
 * **binário**: os mesmos frames da fonte. Um viewer sem H.264 recebe só JPEG. Um viewer novo só recebe deltas depois de um quadro-chave.
 * `{"type":"source","connected":true|false}`
+* `{"type":"auth","state":"pending"|"accepted"|"rejected"|"kicked"|"blocked"}`: resultado da autorização. Um aparelho só recebe imagem e cursor depois de `accepted`. Em `rejected`, `kicked` e `blocked` o servidor fecha a conexão logo em seguida, e a página não reconecta sozinha.
 * `{"type":"stream-info",…}` (repasse da fonte)
 
 **Filas por viewer:** JPEG guarda no máximo 1 frame pendente, sempre o mais recente. H.264 usa uma fila ordenada de até 120 frames (~2 s a 60 fps). Se ela encher, é esvaziada e o servidor pede um novo quadro-chave. Assim, um aparelho lento pula imagens em vez de acumular atraso.

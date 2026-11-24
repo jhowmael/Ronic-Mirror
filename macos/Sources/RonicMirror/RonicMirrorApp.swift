@@ -65,8 +65,22 @@ struct MenuBarContent: View {
             openWindow(id: "main")
         }
         Button("Copiar link") { model.copyURL() }
-        Picker("Posição do aparelho", selection: $model.position) {
-            ForEach(DisplaySide.allCases) { side in Text(side.label).tag(side) }
+        let pending = model.devices.filter(\.isPending).count
+        if pending > 0 {
+            Button("⚠︎ \(pending) aparelho(s) aguardando autorização") {
+                AppDelegate.showInDock(true)
+                openWindow(id: "main")
+            }
+        }
+        Menu("Posição da tela") {
+            ForEach(DisplaySide.allCases) { side in
+                Button((model.placement == .side(side) ? "✓ " : "    ") + side.label) { model.setSide(side) }
+            }
+            Divider()
+            Button("Ajustar arrastando…") {
+                AppDelegate.showInDock(true)
+                openWindow(id: "main")
+            }
         }
         Divider()
         Button("Sair do Ronic Mirror") { NSApp.terminate(nil) }

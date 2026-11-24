@@ -181,6 +181,9 @@ internal static class Native
     public static extern bool GetCursorInfo(ref CURSORINFO pci);
 
     [DllImport("user32.dll")]
+    public static extern bool GetCursorPos(out POINT lpPoint);
+
+    [DllImport("user32.dll")]
     public static extern bool GetIconInfo(IntPtr hIcon, out ICONINFO piconinfo);
 
     [DllImport("user32.dll")]
