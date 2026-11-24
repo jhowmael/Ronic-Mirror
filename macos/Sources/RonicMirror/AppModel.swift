@@ -22,7 +22,9 @@ final class AppModel: ObservableObject {
     @Published var captureStatus: Status = .waiting
     @Published var viewers = 0
     @Published var resolution = ""
-    @Published var needsPermission = false
+    @Published var needsPermission = false {
+        didSet { needsPermission ? startPermissionWatch() : stopPermissionWatch() }
+    }
     @Published var position: DisplaySide {
         didSet {
             UserDefaults.standard.set(position.rawValue, forKey: Keys.position)
@@ -46,6 +48,7 @@ final class AppModel: ObservableObject {
     private var captureGeneration = 0
     private var captureTask: Task<Void, Never>?
     private var resizeWork: DispatchWorkItem?
+    private var permissionTimer: Timer?
 
     private init() {
         position = DisplaySide(rawValue: UserDefaults.standard.string(forKey: Keys.position) ?? "") ?? .right
@@ -218,6 +221,38 @@ final class AppModel: ObservableObject {
         if let u = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
             NSWorkspace.shared.open(u)
         }
+    }
+
+    // MARK: Permissão de Gravação de Tela
+
+    /// Enquanto falta a permissão, verifica a cada 2 s (sem abrir alertas) e retoma a captura sozinho.
+    private func startPermissionWatch() {
+        guard permissionTimer == nil else { return }
+        permissionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, self.needsPermission, CGPreflightScreenCaptureAccess() else { return }
+                self.restartCapture()
+            }
+        }
+    }
+
+    private func stopPermissionWatch() {
+        permissionTimer?.invalidate()
+        permissionTimer = nil
+    }
+
+    /// Remove a entrada antiga do app na lista de Gravação de Tela (comum depois de atualizar o app,
+    /// quando a chave aparece ligada mas pertence à versão anterior) e pede a permissão de novo.
+    func resetPermission() {
+        if let id = Bundle.main.bundleIdentifier {
+            let task = Process()
+            task.executableURL = URL(fileURLWithPath: "/usr/bin/tccutil")
+            task.arguments = ["reset", "ScreenCapture", id]
+            try? task.run()
+            task.waitUntilExit()
+        }
+        CGRequestScreenCaptureAccess()
+        openScreenRecordingSettings()
     }
 
     /// Após conceder a permissão, o macOS normalmente exige reabrir o app.

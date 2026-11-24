@@ -49,6 +49,8 @@ O computador e o aparelho precisam estar **na mesma rede Wi-Fi**.
 3. Permita a **Gravação de Tela**: em **Ajustes do Sistema › Privacidade e Segurança › Gravação de Tela e Áudio do Sistema**, ative **RonicMirror** e clique em **Reabrir app**.
 4. Se o firewall perguntar se `core-server` pode receber conexões, clique em **Permitir**.
 
+> **Ativei a Gravação de Tela e o app continua pedindo?** Isso acontece depois de atualizar o app: a chave nos Ajustes ainda pertence à versão anterior. Clique em **Redefinir permissão** na janela do Ronic Mirror, ative de novo e clique em **Reabrir app**. Pelo Terminal: `tccutil reset ScreenCapture io.github.jhowmael.ronicmirror`.
+
 ### Windows
 
 1. Baixe e descompacte `RonicMirror-Windows.zip` em qualquer pasta (por exemplo, `C:\Ronic Mirror`).
@@ -131,6 +133,8 @@ make run-server # roda só o servidor, para testar a página web
 No Windows, para desenvolver: `cd windows/RonicMirror && dotnet run`. O app encontra `core-server/bin/core-server.exe` e `shared-web/` no repositório. Antes, compile o servidor: `cd core-server && go build -o bin/core-server.exe .`
 
 Para regenerar os ícones depois de mudar o logo: `./branding/make-icons.sh` (no macOS).
+
+**Assinatura local estável (macOS):** na sua máquina, `make app` assina com um certificado local criado uma única vez por `scripts/dev-signing.sh`, guardado em `~/.ronic-mirror-signing`. Assim a permissão de Gravação de Tela **continua valendo depois de recompilar**. Com assinatura ad-hoc, o macOS trataria cada build como um app novo. No CI, a assinatura continua ad-hoc.
 
 ## Publicar uma nova versão
 

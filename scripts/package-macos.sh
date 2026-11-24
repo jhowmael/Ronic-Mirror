@@ -6,12 +6,24 @@
 # Variáveis opcionais:
 #   VERSION=0.2.0            versão gravada no Info.plist e no nome do .zip
 #   UNIVERSAL=1              gera binários universais (arm64 + x86_64) — requer Xcode completo
-#   SIGN_IDENTITY="Developer ID Application: Fulano (TEAMID)"   assinatura real (padrão: ad-hoc "-")
+#   SIGN_IDENTITY="Developer ID Application: Fulano (TEAMID)"   assinatura real
+#
+# Assinatura padrão:
+#   - na sua máquina: certificado local estável (scripts/dev-signing.sh), assim a permissão de
+#     Gravação de Tela continua valendo depois de recompilar;
+#   - no CI (variável CI definida): ad-hoc ("-").
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 VERSION="${VERSION:-0.1.0}"
-SIGN_IDENTITY="${SIGN_IDENTITY:--}"
+if [[ -z "${SIGN_IDENTITY:-}" ]]; then
+  if [[ -n "${CI:-}" ]]; then
+    SIGN_IDENTITY="-"
+  else
+    SIGN_IDENTITY="$("$ROOT/scripts/dev-signing.sh" 2>/dev/null || true)"
+    [[ -n "$SIGN_IDENTITY" ]] || SIGN_IDENTITY="-"
+  fi
+fi
 BUILD="$ROOT/build/macos"
 DIST="$ROOT/dist"
 APP="$DIST/RonicMirror.app"
@@ -55,7 +67,7 @@ plutil -replace CFBundleVersion -string "$(date +%Y%m%d%H%M)" "$APP/Contents/Inf
 # 4) Assinatura (ad-hoc por padrão; o helper é assinado antes do app)
 echo "==> Assinando ($SIGN_IDENTITY)"
 SIGN_FLAGS=(--force --sign "$SIGN_IDENTITY")
-if [[ "$SIGN_IDENTITY" != "-" ]]; then
+if [[ "$SIGN_IDENTITY" == Developer\ ID* ]]; then
   SIGN_FLAGS+=(--options runtime --timestamp)
 fi
 codesign "${SIGN_FLAGS[@]}" "$APP/Contents/MacOS/core-server"

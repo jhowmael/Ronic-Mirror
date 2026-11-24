@@ -100,13 +100,17 @@ struct ContentView: View {
             Label("Permissão de Gravação de Tela necessária", systemImage: "exclamationmark.triangle.fill")
                 .font(.headline)
                 .foregroundStyle(.orange)
-            Text("Ative “Ronic Mirror” em Ajustes do Sistema › Privacidade e Segurança › Gravação de Tela e Áudio do Sistema. Depois reabra o app.")
+            Text("1. Em Ajustes do Sistema › Privacidade e Segurança › Gravação de Tela e Áudio do Sistema, ative “RonicMirror”.\n2. Se pedir, clique em Reabrir app.")
                 .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            Text("Já está ativado e mesmo assim aparece este aviso? Isso acontece depois de atualizar o app: a chave nos Ajustes ainda é da versão antiga. Clique em Redefinir permissão e ative de novo.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             HStack {
                 Button("Abrir Ajustes") { model.openScreenRecordingSettings() }
+                Button("Redefinir permissão") { model.resetPermission() }
                 Button("Reabrir app") { model.relaunch() }
-                Button("Tentar novamente") { model.restartCapture() }
             }
         }
         .padding(12)
