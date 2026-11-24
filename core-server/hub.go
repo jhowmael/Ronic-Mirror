@@ -17,7 +17,9 @@ import (
 const (
 	maxFrameBytes = 64 << 20 // 64 MB: limite de leitura de um frame vindo da fonte
 	writeTimeout  = 5 * time.Second
-	videoQueueLen = 120 // ~2 s de vídeo a 60 fps por viewer
+	// Fila de vídeo por aparelho: no máximo ~200 ms. Se o Wi-Fi engasgar, em vez de acumular atraso
+	// (a imagem "ficar para trás" do mouse), a fila é descartada e o aparelho recebe um quadro-chave novo.
+	videoQueueLen = 12
 )
 
 // Tipos de mensagem binária (primeiro byte). Ver docs/PROTOCOL.md.
@@ -28,7 +30,13 @@ const (
 	frameCursorPos  = 0x20 // posição do cursor (fora do vídeo, para latência mínima)
 	frameCursorImg  = 0x21 // imagem do cursor (PNG)
 	frameJPEG       = 0xFF // JPEG puro (começa com FF D8)
+	// 0xA0 + tamanho (u8) + conn (ASCII) + mensagem: entrega a mensagem SÓ ao aparelho "conn".
+	// Cada aparelho tem a sua própria tela virtual; sem esse prefixo, a mensagem vai para todos.
+	frameTargeted = 0xA0
 )
+
+// Vídeo já é comprimido: compressão do WebSocket só gastaria CPU e somaria atraso.
+var acceptOptions = &websocket.AcceptOptions{CompressionMode: websocket.CompressionDisabled}
 
 // Estados de um viewer.
 const (
@@ -71,6 +79,8 @@ type peer struct {
 	h264     bool // o navegador decodifica H.264 (WebCodecs)
 	needKey  bool // aguardando um quadro-chave antes de receber deltas
 	res      *Resolution
+	keyReqAt time.Time       // último pedido de quadro-chave feito para este aparelho
+	info     json.RawMessage // último "stream-info" da tela deste aparelho
 }
 
 func newPeer(c *websocket.Conn, cancel context.CancelFunc) *peer {
@@ -170,7 +180,6 @@ type Hub struct {
 	lastCursor  []byte
 	lastShape   []byte
 	lastViewRes *Resolution
-	lastKeyReq  time.Time
 	lastH264    bool
 
 	policyKnown bool // até o app mandar a política, todo aparelho novo aguarda
@@ -194,13 +203,14 @@ func (h *Hub) handleSource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "a fonte só pode conectar via 127.0.0.1", http.StatusForbidden)
 		return
 	}
-	c, err := websocket.Accept(w, r, nil)
+	c, err := websocket.Accept(w, r, acceptOptions)
 	if err != nil {
 		return
 	}
 	c.SetReadLimit(maxFrameBytes)
 	ctx, cancel := context.WithCancel(context.Background())
 	src := newPeer(c, cancel)
+	src.ctrl = make(chan []byte, 1024) // toques (input) não podem se perder: ex. "soltar" depois de arrastar
 	defer func() {
 		cancel()
 		c.Close(websocket.StatusNormalClosure, "")
@@ -218,9 +228,6 @@ func (h *Hub) handleSource(w http.ResponseWriter, r *http.Request) {
 	src.pushCtrl(map[string]any{"type": "server-info", "version": version, "port": h.port, "urls": viewerURLs(h.port)})
 	h.notifyViewersLocked()
 	h.notifyDevicesLocked()
-	if res := h.lastViewRes; res != nil {
-		src.pushCtrl(map[string]any{"type": "viewer-resolution", "width": res.Width, "height": res.Height, "dpr": res.DPR})
-	}
 	h.mu.Unlock()
 
 	log.Printf("fonte conectada (%s)", r.RemoteAddr)
@@ -269,10 +276,20 @@ func (h *Hub) handleSourceText(data []byte) {
 
 	switch msg.Type {
 	case "stream-info":
-		h.streamInfo = append(json.RawMessage(nil), data...)
+		info := append(json.RawMessage(nil), data...)
+		if msg.Conn != "" { // informação da tela de um aparelho específico
+			if v := h.findLocked(msg.Conn); v != nil {
+				v.info = info
+				if v.state == stateActive {
+					v.pushRaw(info)
+				}
+			}
+			return
+		}
+		h.streamInfo = info
 		for v := range h.viewers {
 			if v.state == stateActive {
-				v.pushRaw(h.streamInfo)
+				v.pushRaw(info)
 			}
 		}
 
@@ -319,55 +336,65 @@ func (h *Hub) broadcastBinary(f []byte) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	if f[0] == frameTargeted {
+		if len(f) < 3 || len(f) < 2+int(f[1])+1 {
+			return
+		}
+		n := int(f[1])
+		if v := h.findLocked(string(f[2 : 2+n])); v != nil && v.state == stateActive {
+			h.deliverLocked(v, f[2+n:])
+		}
+		return
+	}
+
+	// Sem destino: vale para todos (e fica guardado para quem for aceito depois).
 	switch f[0] {
 	case frameCursorPos:
 		h.lastCursor = f
-		for v := range h.viewers {
-			if v.state == stateActive {
-				pushSlot(v.cursor, f)
-			}
-		}
 	case frameCursorImg:
 		h.lastShape = f
-		for v := range h.viewers {
-			if v.state == stateActive {
-				pushSlot(v.shape, f)
-			}
-		}
 	case frameH264Config:
 		h.lastFrame = nil
-		for v := range h.viewers {
-			if v.state == stateActive && v.h264 && !v.pushOrdered(f) {
-				h.overflowLocked(v)
-			}
+	case frameH264Key, frameH264Delta:
+	default:
+		h.lastFrame = f
+	}
+	for v := range h.viewers {
+		if v.state == stateActive {
+			h.deliverLocked(v, f)
+		}
+	}
+}
+
+// deliverLocked entrega uma mensagem binária a um aparelho, respeitando as regras de cada tipo.
+func (h *Hub) deliverLocked(v *peer, f []byte) {
+	switch f[0] {
+	case frameCursorPos:
+		pushSlot(v.cursor, f)
+	case frameCursorImg:
+		pushSlot(v.shape, f)
+	case frameH264Config:
+		if v.h264 && !v.pushOrdered(f) {
+			h.overflowLocked(v)
 		}
 	case frameH264Key:
-		for v := range h.viewers {
-			if v.state != stateActive || !v.h264 {
-				continue
-			}
-			if v.pushOrdered(f) {
-				v.needKey = false
-			} else {
-				h.overflowLocked(v)
-			}
+		if !v.h264 {
+			return
+		}
+		if v.pushOrdered(f) {
+			v.needKey = false
+		} else {
+			h.overflowLocked(v)
 		}
 	case frameH264Delta:
-		for v := range h.viewers {
-			if v.state != stateActive || !v.h264 || v.needKey {
-				continue
-			}
-			if !v.pushOrdered(f) {
-				h.overflowLocked(v)
-			}
+		if !v.h264 || v.needKey {
+			return
 		}
-	default: // JPEG (ou formato desconhecido): sempre o mais recente
-		h.lastFrame = f
-		for v := range h.viewers {
-			if v.state == stateActive {
-				v.pushLatest(f)
-			}
+		if !v.pushOrdered(f) {
+			h.overflowLocked(v)
 		}
+	default: // JPEG: sempre o mais recente
+		v.pushLatest(f)
 	}
 }
 
@@ -375,15 +402,16 @@ func (h *Hub) broadcastBinary(f []byte) {
 func (h *Hub) overflowLocked(v *peer) {
 	drainChan(v.frames)
 	v.needKey = true
-	h.requestKeyFrameLocked()
+	h.requestKeyFrameLocked(v)
 }
 
-func (h *Hub) requestKeyFrameLocked() {
-	if h.source == nil || time.Since(h.lastKeyReq) < 300*time.Millisecond {
+// requestKeyFrameLocked pede à fonte um quadro-chave para a tela deste aparelho.
+func (h *Hub) requestKeyFrameLocked(v *peer) {
+	if h.source == nil || time.Since(v.keyReqAt) < 300*time.Millisecond {
 		return
 	}
-	h.lastKeyReq = time.Now()
-	h.source.pushCtrl(map[string]any{"type": "keyframe-request"})
+	v.keyReqAt = time.Now()
+	h.source.pushCtrl(map[string]any{"type": "keyframe-request", "conn": v.id})
 }
 
 // ---------- Autorização ----------
@@ -416,7 +444,9 @@ func (h *Hub) activateLocked(v *peer) {
 	v.state = stateActive
 	v.needKey = true
 	v.pushCtrl(map[string]any{"type": "auth", "state": "accepted"})
-	if h.streamInfo != nil {
+	if v.info != nil {
+		v.pushRaw(v.info)
+	} else if h.streamInfo != nil {
 		v.pushRaw(h.streamInfo)
 	}
 	if h.lastFrame != nil {
@@ -431,11 +461,11 @@ func (h *Hub) activateLocked(v *peer) {
 	if v.res != nil {
 		h.lastViewRes = v.res
 		if h.source != nil {
-			h.source.pushCtrl(map[string]any{"type": "viewer-resolution", "width": v.res.Width, "height": v.res.Height, "dpr": v.res.DPR})
+			h.source.pushCtrl(map[string]any{"type": "viewer-resolution", "conn": v.id, "width": v.res.Width, "height": v.res.Height, "dpr": v.res.DPR})
 		}
 	}
-	h.lastKeyReq = time.Time{} // o aparelho novo precisa de um quadro-chave já
-	h.requestKeyFrameLocked()
+	v.keyReqAt = time.Time{} // o aparelho novo precisa de um quadro-chave já
+	h.requestKeyFrameLocked(v)
 	h.notifyViewersLocked()
 	h.notifyDevicesLocked()
 	log.Printf("aparelho conectado: %s (%s)", v.name, v.ip)
@@ -526,7 +556,7 @@ func (h *Hub) notifyDevicesLocked() {
 // ---------- Viewers (iPad, tablet, celular, navegador) ----------
 
 func (h *Hub) handleViewer(w http.ResponseWriter, r *http.Request) {
-	c, err := websocket.Accept(w, r, nil)
+	c, err := websocket.Accept(w, r, acceptOptions)
 	if err != nil {
 		return
 	}
@@ -544,6 +574,8 @@ func (h *Hub) handleViewer(w http.ResponseWriter, r *http.Request) {
 	v.id = fmt.Sprintf("d%d", h.nextID)
 	v.name = "Aparelho"
 	h.viewers[v] = struct{}{}
+	// A página compara a versão: se o app foi atualizado, ela se recarrega sozinha.
+	v.pushCtrl(map[string]any{"type": "server", "version": version})
 	v.pushCtrl(map[string]any{"type": "source", "connected": h.source != nil})
 	if h.blockedIPs[v.ip] {
 		h.closeViewerLocked(v, "blocked")
@@ -605,10 +637,11 @@ func (h *Hub) handleViewerText(v *peer, data []byte) {
 			v.needKey = true
 			if v.state == stateActive {
 				h.notifyViewersLocked()
+				h.notifyDevicesLocked()
 			}
 		}
 		if supports && v.state == stateActive {
-			h.requestKeyFrameLocked()
+			h.requestKeyFrameLocked(v)
 		}
 	}
 
@@ -634,14 +667,36 @@ func (h *Hub) handleViewerText(v *peer, data []byte) {
 		if v.state == stateActive {
 			h.lastViewRes = &res
 			if h.source != nil {
-				h.source.pushCtrl(map[string]any{"type": "viewer-resolution", "width": res.Width, "height": res.Height, "dpr": res.DPR})
+				h.source.pushCtrl(map[string]any{"type": "viewer-resolution", "conn": v.id, "width": res.Width, "height": res.Height, "dpr": res.DPR})
 			}
 			h.notifyDevicesLocked()
 		}
+	case "input":
+		// Toque no aparelho → mouse no computador (só de aparelhos aceitos).
+		if v.state != stateActive || h.source == nil {
+			return
+		}
+		var in map[string]any
+		if json.Unmarshal(data, &in) != nil {
+			return
+		}
+		kind, _ := in["kind"].(string)
+		switch kind {
+		case "tap", "rtap", "scroll", "down", "move", "up":
+		default:
+			return
+		}
+		out := map[string]any{"type": "input", "conn": v.id, "kind": kind}
+		for _, k := range []string{"x", "y", "dx", "dy"} {
+			if f, ok := in[k].(float64); ok {
+				out[k] = f
+			}
+		}
+		h.source.pushCtrl(out)
 	case "keyframe-request":
 		if v.state == stateActive {
 			v.needKey = true
-			h.requestKeyFrameLocked()
+			h.requestKeyFrameLocked(v)
 		}
 	}
 }

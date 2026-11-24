@@ -10,6 +10,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 14) {
             header
             if model.needsPermission { permissionBanner }
+            if model.needsAccessibility { accessibilityBanner }
 
             Picker("", selection: $tab) {
                 Text("Conexão").tag(0)
@@ -63,6 +64,21 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var accessibilityBanner: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Permita a Acessibilidade para usar o toque", systemImage: "hand.tap.fill")
+                .font(.headline)
+                .foregroundStyle(.orange)
+            Text("Para os toques no aparelho virarem cliques e rolagem no Mac, ative “RonicMirror” em Ajustes do Sistema › Privacidade e Segurança › Acessibilidade.")
+                .font(.callout)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Abrir Ajustes de Acessibilidade") { model.openAccessibilitySettings() }
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private var permissionBanner: some View {
@@ -131,14 +147,22 @@ struct ConnectionTab: View {
             Section2(title: "Status") {
                 VStack(alignment: .leading, spacing: 6) {
                     StatusRow(title: "Servidor local", status: model.serverStatus)
-                    StatusRow(title: "Monitor virtual \(model.resolution)", status: model.displayStatus)
-                    StatusRow(title: "Captura de tela · \(model.codec) até 60 fps · cursor em tempo real", status: model.captureStatus)
-                    HStack(spacing: 8) {
-                        Image(systemName: "ipad.and.iphone")
-                            .foregroundStyle(model.viewers > 0 ? .green : .secondary)
-                            .frame(width: 14)
-                        Text(model.viewers == 1 ? "1 aparelho conectado" : "\(model.viewers) aparelhos conectados")
+                    let _ = model.screensRevision
+                    if model.screens.isEmpty {
+                        HStack(spacing: 8) {
+                            Image(systemName: "ipad.and.iphone").foregroundStyle(.secondary).frame(width: 14)
+                            Text("Nenhum aparelho conectado. Cada aparelho aceito ganha a sua própria tela.")
+                                .foregroundStyle(.secondary)
+                        }
                     }
+                    ForEach(model.screens) { screen in
+                        StatusRow(title: "Tela de \(screen.name) · \(screen.sizeLabel) · \(screen.router.currentCodec == .h264 ? "H.264" : "JPEG") até 60 fps",
+                                  status: screen.status)
+                    }
+                    Text("Toque no aparelho: 1 dedo = clique · 2 dedos = clique direito · arrastar = rolar · segurar e arrastar = arrastar")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .padding(.top, 4)
                 }
                 .font(.callout)
             }
@@ -280,32 +304,46 @@ struct SavedRow: View {
 
 struct DisplaysTab: View {
     @EnvironmentObject var model: AppModel
+    @State private var selected: CGDirectDisplayID?
 
     var body: some View {
+        let _ = model.screensRevision
+        let current = model.screens.first { $0.displayID == selected } ?? model.screens.first
         VStack(alignment: .leading, spacing: 14) {
-            Text("Arraste a tela **Ronic Mirror** para onde ela fica em relação aos seus monitores. Ao soltar, ela gruda na borda mais próxima, como em Ajustes do Sistema › Monitores.")
+            Text("Cada aparelho conectado tem a sua tela (em azul). Arraste-as para onde ficam em relação aos seus monitores. Ao soltar, elas grudam na borda mais próxima, como em Ajustes do Sistema › Monitores.")
                 .font(.callout)
                 .fixedSize(horizontal: false, vertical: true)
 
-            DisplayArrangementView()
+            DisplayArrangementView(selected: current?.displayID) { id in selected = id }
                 .frame(height: 300)
 
-            HStack(spacing: 8) {
-                Text("Posição rápida:").foregroundStyle(.secondary)
-                ForEach(DisplaySide.allCases) { side in
-                    let selected = model.placement == .side(side)
-                    Button {
-                        model.setSide(side)
-                    } label: {
-                        Label(side.label, systemImage: side.symbol)
+            if let current {
+                HStack(spacing: 8) {
+                    if model.screens.count > 1 {
+                        Picker("Tela", selection: Binding(get: { current.displayID }, set: { selected = $0 })) {
+                            ForEach(model.screens) { s in Text(s.name).tag(s.displayID) }
+                        }
+                        .fixedSize()
+                    } else {
+                        Text("Posição rápida:").foregroundStyle(.secondary)
                     }
-                    .buttonStyle(.bordered)
-                    .tint(selected ? .accentColor : nil)
-                    .background(selected ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                    ForEach(DisplaySide.allCases) { side in
+                        let isSelected = current.placement == .side(side)
+                        Button {
+                            model.setSide(side, for: current)
+                        } label: {
+                            Label(side.label, systemImage: side.symbol)
+                        }
+                        .buttonStyle(.bordered)
+                        .background(isSelected ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 6))
+                    }
                 }
-            }
-            if case .custom = model.placement {
-                Text("Posição personalizada").font(.caption).foregroundStyle(.secondary)
+                if case .custom = current.placement {
+                    Text("Posição personalizada").font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                Text("Conecte um aparelho para posicionar a tela dele.")
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -313,7 +351,10 @@ struct DisplaysTab: View {
 
 struct DisplayArrangementView: View {
     @EnvironmentObject var model: AppModel
+    var selected: CGDirectDisplayID?
+    var onSelect: (CGDirectDisplayID) -> Void = { _ in }
     @State private var dragOffset: CGSize = .zero
+    @State private var dragging: CGDirectDisplayID?
 
     var body: some View {
         GeometryReader { geo in
@@ -329,21 +370,25 @@ struct DisplayArrangementView: View {
                     .fill(Color.secondary.opacity(0.08))
                 ForEach(displays) { d in
                     let w = d.frame.width * scale, h = d.frame.height * scale
-                    let x = d.frame.minX * scale + originX + (d.isVirtual ? dragOffset.width : 0)
-                    let y = d.frame.minY * scale + originY + (d.isVirtual ? dragOffset.height : 0)
-                    DisplayTile(info: d, dragging: d.isVirtual && dragOffset != .zero)
+                    let isDragging = dragging == d.id
+                    let x = d.frame.minX * scale + originX + (isDragging ? dragOffset.width : 0)
+                    let y = d.frame.minY * scale + originY + (isDragging ? dragOffset.height : 0)
+                    DisplayTile(info: d, dragging: isDragging, selected: d.isVirtual && d.id == selected)
                         .frame(width: max(w - 2, 4), height: max(h - 2, 4))
                         .offset(x: x + 1, y: y + 1)
-                        .zIndex(d.isVirtual ? 1 : 0)
+                        .zIndex(isDragging ? 2 : d.isVirtual ? 1 : 0)
                         .gesture(
-                            DragGesture()
-                                .onChanged { dragOffset = $0.translation }
+                            DragGesture(minimumDistance: 0)
+                                .onChanged { value in
+                                    if dragging != d.id { dragging = d.id; onSelect(d.id) }
+                                    dragOffset = value.translation
+                                }
                                 .onEnded { value in
-                                    guard scale > 0 else { return }
+                                    defer { dragging = nil; dragOffset = .zero }
+                                    guard scale > 0, hypot(value.translation.width, value.translation.height) > 2 else { return }
                                     let target = CGPoint(x: d.frame.minX + value.translation.width / scale,
                                                          y: d.frame.minY + value.translation.height / scale)
-                                    dragOffset = .zero
-                                    model.moveVirtualDisplay(to: target)
+                                    model.moveScreen(d.id, to: target)
                                 },
                             including: d.isVirtual ? .all : .none
                         )
@@ -356,6 +401,7 @@ struct DisplayArrangementView: View {
 struct DisplayTile: View {
     let info: DisplayInfo
     let dragging: Bool
+    var selected = false
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -366,7 +412,8 @@ struct DisplayTile: View {
                       : AnyShapeStyle(Color(nsColor: .controlBackgroundColor)))
                 .shadow(color: .black.opacity(dragging ? 0.35 : 0.12), radius: dragging ? 8 : 2, y: dragging ? 4 : 1)
             RoundedRectangle(cornerRadius: 6)
-                .strokeBorder(info.isVirtual ? Color.white.opacity(0.7) : Color.secondary.opacity(0.5), lineWidth: 1.5)
+                .strokeBorder(selected ? Color.accentColor : info.isVirtual ? Color.white.opacity(0.7) : Color.secondary.opacity(0.5),
+                              lineWidth: selected ? 3 : 1.5)
             if info.isMain {
                 Rectangle().fill(Color.secondary.opacity(0.35)).frame(height: 5) // barra de menus
                     .clipShape(RoundedRectangle(cornerRadius: 6))
@@ -386,7 +433,7 @@ struct DisplayTile: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .contentShape(Rectangle())
-        .help(info.isVirtual ? "Arraste para reposicionar a tela do Ronic Mirror" : info.name)
+        .help(info.isVirtual ? "Arraste para reposicionar a tela de \(info.name)" : info.name)
     }
 }
 

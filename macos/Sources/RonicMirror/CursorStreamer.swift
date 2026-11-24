@@ -13,14 +13,18 @@ final class CursorStreamer {
     private var shapeTimer: Timer?
 
     private let lock = NSLock()
-    private var displayID: CGDirectDisplayID = 0
-    private var last = (x: Float(-1), y: Float(-1), visible: false)
+    /// Uma entrada por aparelho: a tela dele e o prefixo de endereçamento.
+    private var targets: [(conn: String, displayID: CGDirectDisplayID, prefix: Data)] = []
+    private var last: [String: (x: Float, y: Float, visible: Bool)] = [:]
     private var lastShapeKey: Int?
 
     init(source: SourceClient) { self.source = source }
 
-    func setDisplay(_ id: CGDirectDisplayID) {
-        lock.lock(); displayID = id; lock.unlock()
+    func setTargets(_ list: [(conn: String, displayID: CGDirectDisplayID)]) {
+        lock.lock()
+        targets = list.map { ($0.conn, $0.displayID, FrameRouter.prefix(for: $0.conn)) }
+        last = last.filter { entry in list.contains { $0.conn == entry.key } }
+        lock.unlock()
     }
 
     func start() {
@@ -38,33 +42,38 @@ final class CursorStreamer {
 
     /// Reenvia posição e formato (ex.: depois de reconectar ao servidor).
     func resendAll() {
-        lock.lock(); last = (-1, -1, false); lastShapeKey = nil; lock.unlock()
+        lock.lock(); last = [:]; lastShapeKey = nil; lock.unlock()
         DispatchQueue.main.async { self.tickShape() }
     }
 
     private func tickPosition() {
-        lock.lock(); let id = displayID; lock.unlock()
-        guard id != 0, let location = CGEvent(source: nil)?.location else { return }
-        let b = CGDisplayBounds(id)
-        guard b.width > 0, b.height > 0 else { return }
-        let visible = b.contains(location)
-        let x = Float((location.x - b.minX) / b.width)
-        let y = Float((location.y - b.minY) / b.height)
+        guard let location = CGEvent(source: nil)?.location else { return }
+        lock.lock(); let list = targets; lock.unlock()
 
-        lock.lock()
-        let changed = visible != last.visible || (visible && (abs(x - last.x) > 0.00002 || abs(y - last.y) > 0.00002))
-        if changed { last = (x, y, visible) }
-        lock.unlock()
-        guard changed else { return }
+        for t in list {
+            let b = CGDisplayBounds(t.displayID)
+            guard b.width > 0, b.height > 0 else { continue }
+            let visible = b.contains(location)
+            let x = Float((location.x - b.minX) / b.width)
+            let y = Float((location.y - b.minY) / b.height)
 
-        var data = Data(count: 10)
-        data[0] = 0x20
-        data.withUnsafeMutableBytes { raw in
-            raw.storeBytes(of: x.bitPattern.littleEndian, toByteOffset: 1, as: UInt32.self)
-            raw.storeBytes(of: y.bitPattern.littleEndian, toByteOffset: 5, as: UInt32.self)
+            lock.lock()
+            let prev = last[t.conn]
+            let changed = prev == nil || visible != prev!.visible ||
+                (visible && (abs(x - prev!.x) > 0.00002 || abs(y - prev!.y) > 0.00002))
+            if changed { last[t.conn] = (x, y, visible) }
+            lock.unlock()
+            guard changed else { continue }
+
+            var data = Data(count: 10)
+            data[0] = 0x20
+            data.withUnsafeMutableBytes { raw in
+                raw.storeBytes(of: x.bitPattern.littleEndian, toByteOffset: 1, as: UInt32.self)
+                raw.storeBytes(of: y.bitPattern.littleEndian, toByteOffset: 5, as: UInt32.self)
+            }
+            data[9] = visible ? 1 : 0
+            source.sendImmediate(t.prefix + data) // só o aparelho desta tela recebe
         }
-        data[9] = visible ? 1 : 0
-        source.sendImmediate(data)
     }
 
     private func tickShape() {

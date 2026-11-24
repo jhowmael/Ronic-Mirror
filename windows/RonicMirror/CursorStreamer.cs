@@ -14,15 +14,18 @@ namespace RonicMirror;
 internal sealed class CursorStreamer : IDisposable
 {
     private readonly SourceClient _source;
-    private readonly Func<Rectangle?> _bounds;
+    private volatile List<(byte[] Prefix, Func<Rectangle> Bounds)> _targets = new();
     private Thread? _thread;
     private volatile bool _running;
     private volatile bool _resend;
 
-    public CursorStreamer(SourceClient source, Func<Rectangle?> bounds)
+    public CursorStreamer(SourceClient source) => _source = source;
+
+    /// <summary>Uma entrada por aparelho: o prefixo de endereçamento e a área da tela dele.</summary>
+    public void SetTargets(List<(byte[] Prefix, Func<Rectangle> Bounds)> targets)
     {
-        _source = source;
-        _bounds = bounds;
+        _targets = targets;
+        _resend = true;
     }
 
     public void Start()
@@ -44,8 +47,7 @@ internal sealed class CursorStreamer : IDisposable
 
     private void Loop()
     {
-        float lastX = -1, lastY = -1;
-        bool lastVisible = false;
+        var last = new Dictionary<byte[], (float X, float Y, bool Visible)>(ReferenceEqualityComparer.Instance);
         IntPtr lastCursor = IntPtr.Zero;
 
         while (_running)
@@ -55,33 +57,39 @@ internal sealed class CursorStreamer : IDisposable
                 if (_resend)
                 {
                     _resend = false;
-                    lastX = lastY = -1;
+                    last.Clear();
                     lastCursor = IntPtr.Zero;
                 }
 
-                var b = _bounds();
                 var ci = new CURSORINFO { cbSize = Marshal.SizeOf<CURSORINFO>() };
-                if (b is { Width: > 0, Height: > 0 } r && GetCursorInfo(ref ci))
+                if (GetCursorInfo(ref ci))
                 {
-                    bool visible = (ci.flags & CURSOR_SHOWING) != 0 && r.Contains(ci.ptScreenPos.X, ci.ptScreenPos.Y);
-                    float x = (ci.ptScreenPos.X - r.X) / (float)r.Width;
-                    float y = (ci.ptScreenPos.Y - r.Y) / (float)r.Height;
-
-                    if (visible != lastVisible || (visible && (x != lastX || y != lastY)))
+                    foreach (var (prefix, boundsOf) in _targets)
                     {
-                        lastVisible = visible; lastX = x; lastY = y;
-                        var msg = new byte[10];
-                        msg[0] = 0x20;
-                        BitConverter.TryWriteBytes(msg.AsSpan(1), x);
-                        BitConverter.TryWriteBytes(msg.AsSpan(5), y);
-                        msg[9] = (byte)(visible ? 1 : 0);
-                        _source.TrySendImmediate(msg);
+                        var r = boundsOf();
+                        if (r.Width <= 0 || r.Height <= 0) continue;
+                        bool visible = (ci.flags & CURSOR_SHOWING) != 0 && r.Contains(ci.ptScreenPos.X, ci.ptScreenPos.Y);
+                        float x = (ci.ptScreenPos.X - r.X) / (float)r.Width;
+                        float y = (ci.ptScreenPos.Y - r.Y) / (float)r.Height;
+                        bool changed = !last.TryGetValue(prefix, out var prev) || visible != prev.Visible ||
+                                       (visible && (x != prev.X || y != prev.Y));
+                        if (!changed) continue;
+                        last[prefix] = (x, y, visible);
+
+                        var msg = new byte[prefix.Length + 10];
+                        prefix.CopyTo(msg, 0);
+                        int o = prefix.Length;
+                        msg[o] = 0x20;
+                        BitConverter.TryWriteBytes(msg.AsSpan(o + 1), x);
+                        BitConverter.TryWriteBytes(msg.AsSpan(o + 5), y);
+                        msg[o + 9] = (byte)(visible ? 1 : 0);
+                        _source.TrySendImmediate(msg); // só o aparelho desta tela recebe
                     }
 
                     if (ci.hCursor != IntPtr.Zero && ci.hCursor != lastCursor)
                     {
                         lastCursor = ci.hCursor;
-                        var shape = EncodeShape(ci.hCursor);
+                        var shape = EncodeShape(ci.hCursor); // formato: vale para todos
                         if (shape != null) _ = _source.SendBinaryAsync(shape);
                     }
                 }

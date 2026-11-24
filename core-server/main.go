@@ -24,7 +24,7 @@ import (
 	"time"
 )
 
-const version = "0.3.0"
+const version = "0.4.0"
 
 func main() {
 	port := flag.Int("port", 3000, "porta HTTP preferida (tenta as 10 seguintes se estiver ocupada)")
@@ -68,7 +68,7 @@ func main() {
 	}
 
 	srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	if err := srv.Serve(lowLatencyListener{ln}); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fatal(err)
 	}
 }
@@ -84,6 +84,21 @@ func listen(preferred, tries int) (net.Listener, int, error) {
 		lastErr = err
 	}
 	return nil, 0, fmt.Errorf("nenhuma porta livre entre %d e %d: %w", preferred, preferred+tries, lastErr)
+}
+
+// lowLatencyListener limita o buffer de envio do sistema em cada conexão. Sem isso, num Wi-Fi
+// mais lento o sistema guarda vários frames "no caminho" (às vezes meio segundo ou mais) e a
+// imagem chega atrasada. Com o buffer pequeno, quem descarta o excesso é o servidor, que sabe
+// pular para o quadro mais recente.
+type lowLatencyListener struct{ net.Listener }
+
+func (l lowLatencyListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if tc, ok := c.(*net.TCPConn); ok && err == nil {
+		_ = tc.SetNoDelay(true)
+		_ = tc.SetWriteBuffer(128 << 10)
+	}
+	return c, err
 }
 
 // resolveWebDir encontra a pasta do cliente web, tanto em desenvolvimento

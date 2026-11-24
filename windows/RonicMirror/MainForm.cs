@@ -16,7 +16,7 @@ internal sealed class MainForm : Form
     private readonly NotifyIcon _tray = new();
     private readonly ToolStripMenuItem _trayUrl = new() { Enabled = false };
     private readonly ToolStripMenuItem _trayPending = new() { Visible = false };
-    private readonly Dictionary<DisplaySide, ToolStripMenuItem> _traySides = new();
+    private readonly ToolStripMenuItem _trayPosition = new("Posição das telas");
 
     private readonly TabControl _tabs = new();
     private readonly TabPage _tabDevices = new("Aparelhos");
@@ -40,6 +40,9 @@ internal sealed class MainForm : Form
     private readonly ArrangementControl _arrangement = new();
     private readonly Dictionary<DisplaySide, Button> _sideButtons = new();
     private readonly Label _customLabel = new();
+    private readonly ComboBox _screenPicker = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 170 };
+    private readonly Label _noScreens = new();
+    private string? _selectedScreen; // DeviceName do monitor virtual selecionado
 
     private string _qrFor = "";
     private string _devicesSignature = "";
@@ -124,7 +127,7 @@ internal sealed class MainForm : Form
         _installDriver.Location = new Point(10, 78);
         _installDriver.Click += async (_, _) => await _app.InstallDriverAsync();
         var retry = new Button { Text = "Tentar novamente", AutoSize = true, Location = new Point(130, 78) };
-        retry.Click += async (_, _) => await _app.CreateMonitorAsync();
+        retry.Click += async (_, _) => await _app.CheckDriverAsync();
         _driverPanel.Controls.AddRange(new Control[] { driverText, _installDriver, retry });
         root.Controls.Add(_driverPanel);
 
@@ -202,21 +205,32 @@ internal sealed class MainForm : Form
 
         root.Controls.Add(new Label
         {
-            Text = "Arraste a tela Ronic Mirror para onde ela fica em relação aos seus monitores. Ao soltar, ela gruda na borda mais próxima, como em Configurações › Sistema › Tela.",
+            Text = "Cada aparelho conectado tem a sua tela (em azul). Arraste-as para onde ficam em relação aos seus monitores. Ao soltar, elas grudam na borda mais próxima, como em Configurações › Sistema › Tela.",
             AutoSize = true,
             MaximumSize = new Size(ContentWidth - 20, 0),
             Margin = new Padding(0, 0, 0, 10),
         });
         _arrangement.Size = new Size(ContentWidth - 20, 300);
-        _arrangement.Moved += origin => _app.MoveTo(origin);
+        _arrangement.Moved += (device, origin) => _app.MoveTo(device, origin);
+        _arrangement.Selected += device => { _selectedScreen = device; RefreshUi(); };
         root.Controls.Add(_arrangement);
 
         var quick = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 12, 0, 0) };
         quick.Controls.Add(new Label { Text = "Posição rápida:", AutoSize = true, ForeColor = Color.DimGray, Margin = new Padding(0, 7, 6, 0) });
+        _screenPicker.Margin = new Padding(0, 3, 8, 0);
+        _screenPicker.SelectedIndexChanged += (_, _) =>
+        {
+            if (_screenPicker.SelectedItem is ScreenItem item && item.Screen.Monitor.DeviceName != _selectedScreen)
+            {
+                _selectedScreen = item.Screen.Monitor.DeviceName;
+                RefreshUi();
+            }
+        };
+        quick.Controls.Add(_screenPicker);
         foreach (var (side, label) in new[] { (DisplaySide.Left, "← Esquerda"), (DisplaySide.Right, "Direita →"), (DisplaySide.Top, "↑ Acima"), (DisplaySide.Bottom, "↓ Abaixo") })
         {
             var b = new Button { Text = label, AutoSize = true, Margin = new Padding(0, 0, 6, 0) };
-            b.Click += (_, _) => _app.SetPosition(side);
+            b.Click += (_, _) => { if (SelectedScreen() is { } screen) _app.SetPosition(screen, side); };
             _sideButtons[side] = b;
             quick.Controls.Add(b);
         }
@@ -225,6 +239,10 @@ internal sealed class MainForm : Form
         _customLabel.ForeColor = Color.DimGray;
         _customLabel.AutoSize = true;
         root.Controls.Add(_customLabel);
+        _noScreens.Text = "Conecte um aparelho para posicionar a tela dele.";
+        _noScreens.ForeColor = Color.DimGray;
+        _noScreens.AutoSize = true;
+        root.Controls.Add(_noScreens);
         return page;
     }
 
@@ -380,17 +398,10 @@ internal sealed class MainForm : Form
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Abrir Ronic Mirror", null, (_, _) => ShowWindow());
         menu.Items.Add("Copiar link", null, (_, _) => CopyUrl());
-        var position = new ToolStripMenuItem("Posição da tela");
-        foreach (var (side, label) in new[] { (DisplaySide.Left, "Esquerda"), (DisplaySide.Right, "Direita"), (DisplaySide.Top, "Acima"), (DisplaySide.Bottom, "Abaixo") })
-        {
-            var item = new ToolStripMenuItem(label);
-            item.Click += (_, _) => _app.SetPosition(side);
-            _traySides[side] = item;
-            position.DropDownItems.Add(item);
-        }
-        position.DropDownItems.Add(new ToolStripSeparator());
-        position.DropDownItems.Add("Ajustar arrastando…", null, (_, _) => { ShowWindow(); _tabs.SelectedIndex = 2; });
-        menu.Items.Add(position);
+        // Montado na hora de abrir: um submenu por aparelho conectado.
+        _trayPosition.DropDownItems.Add("(nenhum aparelho)");
+        menu.Opening += (_, _) => BuildTrayPositions();
+        menu.Items.Add(_trayPosition);
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Sair do Ronic Mirror", null, (_, _) => ExitApp());
 
@@ -454,7 +465,10 @@ internal sealed class MainForm : Form
             _qr.Image = MakeQr(_app.Url);
         }
         SetStatus(_serverStatus, "Servidor local", _app.ServerStatus, _app.ServerError);
-        SetStatus(_displayStatus, $"Monitor virtual {_app.Resolution} · até 60 fps · cursor em tempo real", _app.DisplayStatus, _app.DisplayError);
+        string screens = _app.Screens.Count == 0
+            ? "Telas virtuais: nenhum aparelho conectado (cada aparelho aceito ganha a sua)"
+            : "Telas virtuais: " + string.Join(" · ", _app.Screens.Select(s => $"{s.Name} {s.SizeLabel}"));
+        SetStatus(_displayStatus, screens, _app.DisplayStatus, _app.DisplayError);
         _viewers.Text = _app.Viewers == 1 ? "📱 1 aparelho conectado" : $"📱 {_app.Viewers} aparelhos conectados";
         _viewers.ForeColor = _app.Viewers > 0 ? Color.SeaGreen : Color.DimGray;
         _driverPanel.Visible = _app.DriverMissing;
@@ -471,19 +485,61 @@ internal sealed class MainForm : Form
         if (_approval != null && !_app.IsStillPending(_approval.Conn)) _approval.Close();
 
         // Telas
+        var current = SelectedScreen();
+        var items = _app.Screens.Select(sc => new ScreenItem(sc)).ToArray();
+        if (!_screenPicker.Items.Cast<ScreenItem>().Select(i => i.Screen).SequenceEqual(items.Select(i => i.Screen)))
+        {
+            _screenPicker.Items.Clear();
+            _screenPicker.Items.AddRange(items);
+        }
+        if (current != null)
+            _screenPicker.SelectedItem = _screenPicker.Items.Cast<ScreenItem>().FirstOrDefault(i => i.Screen == current);
+        var placement = current != null ? _app.PlacementOf(current) : null;
         foreach (var (side, b) in _sideButtons)
         {
-            bool selected = !_app.CustomPlacement && _app.Position == side;
+            b.Enabled = current != null;
+            bool selected = placement != null && !placement.Custom && placement.Side == side;
             b.BackColor = selected ? Color.FromArgb(214, 245, 251) : SystemColors.Control;
         }
-        _customLabel.Visible = _app.CustomPlacement;
-        foreach (var (side, item) in _traySides) item.Checked = !_app.CustomPlacement && _app.Position == side;
+        _screenPicker.Visible = _app.Screens.Count > 1;
+        _customLabel.Visible = placement?.Custom == true;
+        _noScreens.Visible = _app.Screens.Count == 0;
+        _arrangement.SelectedDevice = current?.Monitor.DeviceName;
         RefreshArrangement();
 
         // Bandeja
         _trayPending.Visible = pending > 0;
         _trayPending.Text = $"⚠ {pending} aparelho(s) aguardando autorização";
         _tray.Text = _app.Viewers > 0 ? $"Ronic Mirror — {_app.Viewers} aparelho(s)" : "Ronic Mirror";
+    }
+
+    private DeviceScreen? SelectedScreen() =>
+        _app.Screens.FirstOrDefault(s => s.Monitor.DeviceName == _selectedScreen) ?? _app.Screens.FirstOrDefault();
+
+    private sealed record ScreenItem(DeviceScreen Screen)
+    {
+        public override string ToString() => Screen.Name;
+    }
+
+    private void BuildTrayPositions()
+    {
+        _trayPosition.DropDownItems.Clear();
+        foreach (var screen in _app.Screens)
+        {
+            var sub = new ToolStripMenuItem(screen.Name);
+            var placement = _app.PlacementOf(screen);
+            foreach (var (side, label) in new[] { (DisplaySide.Left, "Esquerda"), (DisplaySide.Right, "Direita"), (DisplaySide.Top, "Acima"), (DisplaySide.Bottom, "Abaixo") })
+            {
+                var item = new ToolStripMenuItem(label) { Checked = !placement.Custom && placement.Side == side };
+                var sc = screen;
+                item.Click += (_, _) => _app.SetPosition(sc, side);
+                sub.DropDownItems.Add(item);
+            }
+            _trayPosition.DropDownItems.Add(sub);
+        }
+        if (_app.Screens.Count == 0) _trayPosition.DropDownItems.Add(new ToolStripMenuItem("Nenhum aparelho conectado") { Enabled = false });
+        _trayPosition.DropDownItems.Add(new ToolStripSeparator());
+        _trayPosition.DropDownItems.Add("Ajustar arrastando…", null, (_, _) => { ShowWindow(); _tabs.SelectedIndex = 2; });
     }
 
     private void RefreshArrangement()

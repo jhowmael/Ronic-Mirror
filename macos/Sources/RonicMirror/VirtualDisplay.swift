@@ -50,17 +50,19 @@ final class VirtualDisplay {
 
     var displayID: CGDirectDisplayID { display.displayID }
 
-    init?(width: Int, height: Int) {
+    /// - name: aparece em Ajustes › Monitores (ex.: "Ronic Mirror · iPad").
+    /// - serial: diferente para cada aparelho, para o macOS tratar cada um como um monitor distinto.
+    init?(width: Int, height: Int, name: String = "Ronic Mirror", serial: UInt32 = 1) {
         let descriptor = CGVirtualDisplayDescriptor()
         descriptor.setDispatchQueue(DispatchQueue.main)
-        descriptor.name = "Ronic Mirror"
+        descriptor.name = name
         descriptor.maxPixelsWide = UInt32(Self.maxPixels)
         descriptor.maxPixelsHigh = UInt32(Self.maxPixels)
         // ~132 pontos por polegada (densidade típica de um tablet em pontos) -> tamanho físico aproximado.
         descriptor.sizeInMillimeters = CGSize(width: Double(width) / 132.0 * 25.4, height: Double(height) / 132.0 * 25.4)
         descriptor.vendorID = 0x5354
         descriptor.productID = 0x0001
-        descriptor.serialNum = 0x0001
+        descriptor.serialNum = serial
 
         display = CGVirtualDisplay(descriptor: descriptor)
         self.width = width
@@ -157,17 +159,28 @@ final class VirtualDisplay {
     }
 
     /// Todos os monitores ativos, com nome, para o editor visual.
-    static func layout(virtualID: CGDirectDisplayID?) -> [DisplayInfo] {
+    static func layout(virtualNames: [CGDirectDisplayID: String]) -> [DisplayInfo] {
         let names: [CGDirectDisplayID: String] = Dictionary(uniqueKeysWithValues: NSScreen.screens.compactMap { screen in
             guard let n = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber else { return nil }
             return (CGDirectDisplayID(n.uint32Value), screen.localizedName)
         })
         let main = CGMainDisplayID()
         return activeDisplays().map { id in
-            let isVirtual = id == virtualID
-            let name = isVirtual ? "Ronic Mirror" : (names[id] ?? "Monitor")
+            let isVirtual = virtualNames[id] != nil
+            let name = virtualNames[id] ?? names[id] ?? "Monitor"
             return DisplayInfo(id: id, frame: CGDisplayBounds(id), name: name, isMain: id == main, isVirtual: isVirtual)
         }
+    }
+
+    /// Ajusta o tamanho pedido pelo aparelho mantendo a proporção: telas pequenas (celular) são
+    /// ampliadas até o lado menor ter 640 pontos; telas enormes são reduzidas até caber em 4096.
+    static func fit(width: Int, height: Int) -> (Int, Int) {
+        var w = Double(max(width, 1)), h = Double(max(height, 1))
+        let minSide = min(w, h)
+        if minSide < 640 { let k = 640 / minSide; w *= k; h *= k }
+        let maxSide = max(w, h)
+        if maxSide > Double(maxPixels) { let k = Double(maxPixels) / maxSide; w *= k; h *= k }
+        return (sanitize(Int(w.rounded())), sanitize(Int(h.rounded())))
     }
 
     static func sanitize(_ v: Int) -> Int {

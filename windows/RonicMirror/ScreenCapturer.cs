@@ -18,8 +18,9 @@ internal sealed class ScreenCapturer : IDisposable
     /// <summary>Envia o frame; bloqueia até terminar (backpressure natural).</summary>
     public Action<byte[]> OnFrame { get; init; } = _ => { };
 
-    public int Fps { get; } = 60;
-    public long Quality { get; set; } = 60;
+    // JPEG é ~10× mais pesado que H.264: 30 fps mantém o Wi-Fi livre (Wi-Fi congestionado = atraso).
+    public int Fps { get; } = 30;
+    public long Quality { get; set; } = 55;
 
     private Thread? _captureThread, _encodeThread;
     private volatile bool _running;

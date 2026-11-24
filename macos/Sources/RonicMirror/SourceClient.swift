@@ -7,6 +7,8 @@ final class SourceClient: NSObject, URLSessionWebSocketDelegate {
     var onConnectionChange: ((Bool) -> Void)?   // main thread
     /// A fila de vídeo transbordou (frames descartados): é preciso um novo quadro-chave. Qualquer thread.
     var onOverflow: (() -> Void)?
+    /// Toques do aparelho. Chamado na thread de rede (NÃO na main thread), para responder na hora.
+    var onInput: (([String: Any]) -> Void)?
 
     private var session: URLSession!
     private var task: URLSessionWebSocketTask?
@@ -17,7 +19,7 @@ final class SourceClient: NSObject, URLSessionWebSocketDelegate {
     private var isOpen = false
     private var sending = false   // há uma mensagem binária em trânsito
     private var queue: [Data] = [] // vídeo H.264: não pode perder frames, então enfileira em ordem
-    private static let maxQueue = 90
+    private static let maxQueue = 30 // ~0,5 s: se passar disso, descarta e recomeça num quadro-chave
 
     override init() {
         super.init()
@@ -112,7 +114,11 @@ final class SourceClient: NSObject, URLSessionWebSocketDelegate {
             case .success(.string(let text)):
                 if let data = text.data(using: .utf8),
                    let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                    DispatchQueue.main.async { self.onMessage?(obj) }
+                    if obj["type"] as? String == "input", let onInput = self.onInput {
+                        onInput(obj) // toques: direto, sem esperar a main thread (que desenha a janela)
+                    } else {
+                        DispatchQueue.main.async { self.onMessage?(obj) }
+                    }
                 }
                 self.receive(on: t)
             case .success:

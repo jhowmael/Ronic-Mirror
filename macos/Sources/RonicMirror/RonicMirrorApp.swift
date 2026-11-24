@@ -72,10 +72,15 @@ struct MenuBarContent: View {
                 openWindow(id: "main")
             }
         }
-        Menu("Posição da tela") {
-            ForEach(DisplaySide.allCases) { side in
-                Button((model.placement == .side(side) ? "✓ " : "    ") + side.label) { model.setSide(side) }
+        Menu("Posição das telas") {
+            ForEach(model.screens) { screen in
+                Menu(screen.name) {
+                    ForEach(DisplaySide.allCases) { side in
+                        Button((screen.placement == .side(side) ? "✓ " : "    ") + side.label) { model.setSide(side, for: screen) }
+                    }
+                }
             }
+            if model.screens.isEmpty { Text("Nenhum aparelho conectado") }
             Divider()
             Button("Ajustar arrastando…") {
                 AppDelegate.showInDock(true)

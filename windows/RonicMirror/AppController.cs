@@ -24,18 +24,22 @@ internal sealed record DeviceInfo(string Conn, string DeviceId, string Name, str
 /// <summary>Aparelho lembrado (confiável ou bloqueado).</summary>
 internal sealed record SavedDevice(string DeviceId, string Name, string Ip);
 
+/// <summary>Posição salva da tela de um aparelho.</summary>
+internal sealed class SavedPlacement
+{
+    public DisplaySide Side { get; set; } = DisplaySide.Right;
+    public bool Custom { get; set; }
+    public int X { get; set; }
+    public int Y { get; set; }
+}
+
 /// <summary>Configurações locais simples (%APPDATA%\RonicMirror\settings.json).</summary>
 internal sealed class Settings
 {
-    public DisplaySide Position { get; set; } = DisplaySide.Right;
-    public bool CustomPlacement { get; set; }
-    public int CustomX { get; set; }
-    public int CustomY { get; set; }
-    public int Width { get; set; } = 1366;
-    public int Height { get; set; } = 1024;
     public bool RequireApproval { get; set; } = true;
     public List<SavedDevice> Trusted { get; set; } = new();
     public List<SavedDevice> Blocked { get; set; } = new();
+    public Dictionary<string, SavedPlacement> Placements { get; set; } = new();
 
     private static string FilePath => Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData), "RonicMirror", "settings.json");
 
@@ -57,8 +61,8 @@ internal sealed class Settings
 }
 
 /// <summary>
-/// Orquestra: monitor virtual → captura → core-server → aparelhos (equivalente ao AppModel.swift do macOS).
-/// Todas as propriedades são lidas/escritas na thread da interface; o evento Changed avisa a tela.
+/// Orquestra: uma tela virtual POR APARELHO → captura → core-server → aparelho
+/// (equivalente ao AppModel.swift do macOS). Propriedades lidas/escritas na thread da interface.
 /// </summary>
 internal sealed class AppController : IDisposable
 {
@@ -74,37 +78,30 @@ internal sealed class AppController : IDisposable
     public string? DisplayError { get; private set; }
     public bool DriverMissing { get; private set; }
     public bool InstallingDriver { get; private set; }
-    public string Resolution { get; private set; } = "";
     public int Viewers { get; private set; }
     public IReadOnlyList<DeviceInfo> Devices { get; private set; } = Array.Empty<DeviceInfo>();
+    public IReadOnlyList<DeviceScreen> Screens => _screens;
     public IReadOnlyList<SavedDevice> Trusted => _settings.Trusted;
     public IReadOnlyList<SavedDevice> Blocked => _settings.Blocked;
     public bool RequireApproval => _settings.RequireApproval;
-    public DisplaySide Position => _settings.Position;
-    public bool CustomPlacement => _settings.CustomPlacement;
-    public string? VirtualDeviceName => _monitor?.DeviceName;
 
     private readonly SynchronizationContext _ui;
     private readonly Settings _settings = Settings.Load();
     private readonly ServerProcess _server = new();
     private readonly SourceClient _source = new();
-    private readonly ScreenCapturer _capturer;
     private readonly CursorStreamer _cursor;
-    private VirtualMonitor? _monitor;
-    private volatile int _viewers;
-    private System.Threading.Timer? _resizeTimer;
+    private readonly InputInjector _input = new();
+    private readonly List<DeviceScreen> _screens = new();
+    private volatile Dictionary<string, DeviceScreen> _screenByConn = new(); // cópia para a thread de rede
+    private readonly HashSet<string> _creating = new();
     private readonly HashSet<string> _prompted = new();
+    private readonly Dictionary<string, System.Threading.Timer> _resizeTimers = new();
+    private readonly SemaphoreSlim _displayLock = new(1, 1); // operações de monitor em série, fora da UI
 
     public AppController()
     {
         _ui = SynchronizationContext.Current ?? new WindowsFormsSynchronizationContext();
-        _capturer = new ScreenCapturer
-        {
-            Bounds = () => _monitor?.Bounds,
-            ShouldCapture = () => _viewers > 0 && _source.IsConnected,
-            OnFrame = jpeg => _source.TrySendFrame(jpeg),
-        };
-        _cursor = new CursorStreamer(_source, () => _monitor?.Bounds);
+        _cursor = new CursorStreamer(_source);
     }
 
     public void Start()
@@ -122,108 +119,36 @@ internal sealed class AppController : IDisposable
             Post(() =>
             {
                 SendPolicy();
-                SendStreamInfo();
+                foreach (var s in _screens) SendStreamInfo(s);
                 _cursor.ResendAll();
             });
         };
-        _source.Message += msg => Post(() => HandleServerMessage(msg));
+        _source.Message += msg =>
+        {
+            // Toques: tratados direto na thread de rede, sem esperar a interface (resposta imediata).
+            if (msg.TryGetProperty("type", out var t) && t.GetString() == "input")
+                HandleInput(msg, msg.TryGetProperty("conn", out var c) ? c.GetString() : null);
+            else
+                Post(() => HandleServerMessage(msg));
+        };
 
         _server.Start();
-        _capturer.Start();
         _cursor.Start();
-        _ = CreateMonitorAsync();
+        _ = CheckDriverAsync();
     }
 
-    // ---------------- Monitor virtual e posição ----------------
+    // ---------------- Driver ----------------
 
-    private readonly SemaphoreSlim _displayLock = new(1, 1); // operações de monitor em série, fora da UI
-
-    public async Task CreateMonitorAsync()
+    /// <summary>Verifica se o driver de monitor virtual está instalado (sem criar monitor).</summary>
+    public async Task CheckDriverAsync()
     {
-        if (_monitor != null) return;
-        DisplayStatus = Status.Waiting;
-        DisplayError = null;
+        bool ok = await Task.Run(() => { using var vdd = ParsecVdd.TryOpen(); return vdd != null; });
+        DriverMissing = !ok;
+        DisplayStatus = ok ? Status.Ok : Status.Error;
+        DisplayError = ok ? null : new VirtualMonitor.DriverMissingException().Message;
         Changed?.Invoke();
-        await _displayLock.WaitAsync();
-        try
-        {
-            var monitor = await Task.Run(VirtualMonitor.Create);
-            _monitor = monitor;
-            DriverMissing = false;
-            DisplayStatus = Status.Ok;
-        }
-        catch (VirtualMonitor.DriverMissingException ex)
-        {
-            DriverMissing = true;
-            DisplayStatus = Status.Error;
-            DisplayError = ex.Message;
-        }
-        catch (Exception ex)
-        {
-            DisplayStatus = Status.Error;
-            DisplayError = ex.Message;
-        }
-        finally
-        {
-            _displayLock.Release();
-        }
-        Changed?.Invoke();
-        await ApplyLayoutAsync();
+        if (ok) SyncScreens();
     }
-
-    private async Task ApplyLayoutAsync()
-    {
-        var monitor = _monitor;
-        if (monitor == null) return;
-        int w = _settings.Width, h = _settings.Height;
-        var side = _settings.Position;
-        Point? custom = _settings.CustomPlacement ? new Point(_settings.CustomX, _settings.CustomY) : null;
-        await _displayLock.WaitAsync();
-        try
-        {
-            var (aw, ah, origin) = await Task.Run(() => monitor.ApplyLayout(w, h, side, custom));
-            Resolution = $"{aw}×{ah}";
-            if (_settings.CustomPlacement)
-            {
-                // guarda a posição já ajustada à borda
-                _settings.CustomX = origin.X;
-                _settings.CustomY = origin.Y;
-                _settings.Save();
-            }
-        }
-        catch (Exception ex)
-        {
-            DisplayError = "Falha ao ajustar o monitor: " + ex.Message;
-        }
-        finally
-        {
-            _displayLock.Release();
-        }
-        _capturer.ForceNextFrame();
-        SendStreamInfo();
-        Changed?.Invoke();
-    }
-
-    /// <summary>Posição rápida: Esquerda / Direita / Acima / Abaixo.</summary>
-    public void SetPosition(DisplaySide side)
-    {
-        _settings.Position = side;
-        _settings.CustomPlacement = false;
-        _settings.Save();
-        _ = ApplyLayoutAsync();
-    }
-
-    /// <summary>Posição livre (arrastando no editor visual).</summary>
-    public void MoveTo(Point origin)
-    {
-        _settings.CustomPlacement = true;
-        _settings.CustomX = origin.X;
-        _settings.CustomY = origin.Y;
-        _settings.Save();
-        _ = ApplyLayoutAsync();
-    }
-
-    public List<DisplayTileInfo> DisplayLayout() => VirtualMonitor.Layout(_monitor?.DeviceName);
 
     /// <summary>Baixa e executa o instalador do driver (pede permissão de administrador).</summary>
     public async Task InstallDriverAsync()
@@ -242,7 +167,7 @@ internal sealed class AppController : IDisposable
             var p = Process.Start(new ProcessStartInfo(path) { UseShellExecute = true, Verb = "runas", Arguments = "/S" });
             if (p != null) await p.WaitForExitAsync();
             await Task.Delay(1500); // o driver leva um instante para iniciar
-            await CreateMonitorAsync();
+            await CheckDriverAsync();
         }
         catch (Exception ex)
         {
@@ -259,6 +184,150 @@ internal sealed class AppController : IDisposable
 
     public static void OpenDriverPage() =>
         Process.Start(new ProcessStartInfo(ParsecVdd.DriverDownloadUrl) { UseShellExecute = true });
+
+    // ---------------- Telas: uma por aparelho ----------------
+
+    private void SyncScreens()
+    {
+        var active = Devices.Where(d => !d.IsPending).ToList();
+        var activeConns = active.Select(d => d.Conn).ToHashSet();
+
+        // Saíram: o monitor virtual some.
+        foreach (var gone in _screens.Where(s => !activeConns.Contains(s.Conn)).ToList())
+        {
+            _screens.Remove(gone);
+            var g = gone;
+            _ = Task.Run(async () =>
+            {
+                await _displayLock.WaitAsync();
+                try { g.Dispose(); } finally { _displayLock.Release(); }
+            });
+        }
+
+        if (DriverMissing) { UpdateCursorTargets(); return; }
+
+        foreach (var d in active)
+        {
+            if (_screens.Any(s => s.Conn == d.Conn) || !_creating.Add(d.Conn)) continue;
+            _ = CreateScreenAsync(d);
+        }
+        UpdateCursorTargets();
+    }
+
+    private async Task CreateScreenAsync(DeviceInfo device)
+    {
+        await _displayLock.WaitAsync();
+        try
+        {
+            if (!Devices.Any(d => d.Conn == device.Conn && !d.IsPending)) return; // saiu enquanto esperava
+            var monitor = await Task.Run(VirtualMonitor.Create);
+            var screen = new DeviceScreen(device, monitor, _source);
+            var placement = PlacementFor(screen.DeviceKey);
+            var (w, h, _) = await Task.Run(() => monitor.ApplyLayout(screen.RequestedWidth, screen.RequestedHeight,
+                placement.Side, placement.Custom ? new Point(placement.X, placement.Y) : null));
+            screen.SizeLabel = $"{w}×{h}";
+            _screens.Add(screen);
+            screen.Capturer.Start();
+            UpdateCursorTargets();
+            SendStreamInfo(screen);
+            DisplayStatus = Status.Ok;
+            DisplayError = null;
+        }
+        catch (VirtualMonitor.DriverMissingException ex)
+        {
+            DriverMissing = true;
+            DisplayStatus = Status.Error;
+            DisplayError = ex.Message;
+        }
+        catch (Exception ex)
+        {
+            DisplayStatus = Status.Error;
+            DisplayError = $"Não foi possível criar a tela de {device.Name}: {ex.Message}";
+        }
+        finally
+        {
+            _creating.Remove(device.Conn);
+            _displayLock.Release();
+        }
+        // Se o aparelho saiu enquanto a tela era criada, a próxima sincronização a remove.
+        SyncScreens();
+        Changed?.Invoke();
+    }
+
+    private async Task ApplyLayoutAsync(DeviceScreen screen)
+    {
+        var placement = PlacementFor(screen.DeviceKey);
+        await _displayLock.WaitAsync();
+        try
+        {
+            if (!_screens.Contains(screen)) return;
+            var (w, h, origin) = await Task.Run(() => screen.Monitor.ApplyLayout(screen.RequestedWidth, screen.RequestedHeight,
+                placement.Side, placement.Custom ? new Point(placement.X, placement.Y) : null));
+            screen.SizeLabel = $"{w}×{h}";
+            if (placement.Custom)
+            {
+                // guarda a posição já ajustada à borda
+                placement.X = origin.X;
+                placement.Y = origin.Y;
+                _settings.Save();
+            }
+        }
+        catch (Exception ex)
+        {
+            DisplayError = "Falha ao ajustar a tela: " + ex.Message;
+        }
+        finally
+        {
+            _displayLock.Release();
+        }
+        screen.Capturer.ForceNextFrame();
+        SendStreamInfo(screen);
+        Changed?.Invoke();
+    }
+
+    private SavedPlacement PlacementFor(string key)
+    {
+        if (!_settings.Placements.TryGetValue(key, out var p))
+        {
+            p = new SavedPlacement();
+            _settings.Placements[key] = p;
+        }
+        return p;
+    }
+
+    /// <summary>Posição rápida: Esquerda / Direita / Acima / Abaixo.</summary>
+    public void SetPosition(DeviceScreen screen, DisplaySide side)
+    {
+        var p = PlacementFor(screen.DeviceKey);
+        p.Side = side;
+        p.Custom = false;
+        _settings.Save();
+        _ = ApplyLayoutAsync(screen);
+    }
+
+    /// <summary>Posição livre (arrastando no editor visual).</summary>
+    public void MoveTo(string deviceName, Point origin)
+    {
+        var screen = _screens.FirstOrDefault(s => s.Monitor.DeviceName == deviceName);
+        if (screen == null) return;
+        var p = PlacementFor(screen.DeviceKey);
+        p.Custom = true;
+        p.X = origin.X;
+        p.Y = origin.Y;
+        _settings.Save();
+        _ = ApplyLayoutAsync(screen);
+    }
+
+    public SavedPlacement PlacementOf(DeviceScreen screen) => PlacementFor(screen.DeviceKey);
+
+    public List<DisplayTileInfo> DisplayLayout() =>
+        VirtualMonitor.Layout(_screens.ToDictionary(s => s.Monitor.DeviceName, s => s.Name));
+
+    private void UpdateCursorTargets()
+    {
+        _cursor.SetTargets(_screens.Select(s => (s.Prefix, (Func<Rectangle>)(() => s.Monitor.Bounds))).ToList());
+        _screenByConn = _screens.ToDictionary(s => s.Conn);
+    }
 
     // ---------------- Aparelhos: autorização, desconectar, bloquear ----------------
 
@@ -333,6 +402,7 @@ internal sealed class AppController : IDisposable
 
     private void HandleServerMessage(JsonElement msg)
     {
+        string? conn = msg.TryGetProperty("conn", out var c) ? c.GetString() : null;
         switch (msg.TryGetProperty("type", out var t) ? t.GetString() : null)
         {
             case "server-info":
@@ -340,27 +410,47 @@ internal sealed class AppController : IDisposable
                     ApplyUrls(urls.EnumerateArray().Select(x => x.GetString() ?? "").ToArray());
                 break;
             case "viewers":
-                Viewers = _viewers = msg.GetProperty("count").GetInt32();
-                if (_viewers > 0) _capturer.ForceNextFrame();
+                Viewers = msg.GetProperty("count").GetInt32();
                 break;
             case "keyframe-request":
-                _capturer.ForceNextFrame(); // no JPEG todo frame é completo: só reenvia a tela atual
+                // no JPEG todo frame é completo: só reenvia a tela atual
+                foreach (var s in _screens.Where(s => conn == null || s.Conn == conn)) s.Capturer.ForceNextFrame();
                 break;
             case "devices":
                 UpdateDevices(msg.GetProperty("devices"));
                 break;
             case "viewer-resolution":
+                if (conn == null) break;
                 int w = msg.GetProperty("width").GetInt32(), h = msg.GetProperty("height").GetInt32();
                 // debounce: o aparelho pode mandar várias mudanças seguidas ao girar
-                _resizeTimer?.Dispose();
-                _resizeTimer = new System.Threading.Timer(_ => Post(() =>
+                if (_resizeTimers.TryGetValue(conn, out var old)) old.Dispose();
+                _resizeTimers[conn] = new System.Threading.Timer(_ => Post(() =>
                 {
-                    _settings.Width = w;
-                    _settings.Height = h;
-                    _settings.Save();
-                    _ = ApplyLayoutAsync();
+                    var screen = _screens.FirstOrDefault(s => s.Conn == conn);
+                    if (screen == null || (screen.RequestedWidth == w && screen.RequestedHeight == h)) return;
+                    screen.RequestedWidth = w;
+                    screen.RequestedHeight = h;
+                    _ = ApplyLayoutAsync(screen);
                 }), null, 500, Timeout.Infinite);
                 break;
+        }
+    }
+
+    /// <summary>Toque no aparelho → mouse no Windows.</summary>
+    private void HandleInput(JsonElement msg, string? conn)
+    {
+        if (conn == null || !_screenByConn.TryGetValue(conn, out var screen)) return;
+        double Num(string name) => msg.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : 0;
+        var p = screen.ToDesktop(Num("x"), Num("y"));
+        var b = screen.Monitor.Bounds;
+        switch (msg.TryGetProperty("kind", out var k) ? k.GetString() : null)
+        {
+            case "tap": _input.Click(p, right: false); break;
+            case "rtap": _input.Click(p, right: true); break;
+            case "scroll": _input.Scroll(p, Num("dx") * b.Width, Num("dy") * b.Height); break;
+            case "down": _input.DragBegin(p); break;
+            case "move": _input.DragMove(p); break;
+            case "up": _input.DragEnd(p); break;
         }
     }
 
@@ -373,6 +463,7 @@ internal sealed class AppController : IDisposable
             d.TryGetProperty("width", out var w) ? w.GetInt32() : 0,
             d.TryGetProperty("height", out var h) ? h.GetInt32() : 0)).ToList();
 
+        SyncScreens();
         foreach (var d in Devices.Where(d => d.IsPending && _prompted.Add(d.Conn)))
             ApprovalRequested?.Invoke(d);
     }
@@ -380,11 +471,10 @@ internal sealed class AppController : IDisposable
     private static string Str(JsonElement e, string name, string fallback = "") =>
         e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() ?? fallback : fallback;
 
-    private void SendStreamInfo()
+    private void SendStreamInfo(DeviceScreen s)
     {
-        if (_monitor == null) return;
-        var b = _monitor.Bounds;
-        _ = _source.SendJsonAsync(new { type = "stream-info", codec = "jpeg", width = b.Width, height = b.Height, fps = _capturer.Fps });
+        var b = s.Monitor.Bounds;
+        _ = _source.SendJsonAsync(new { type = "stream-info", conn = s.Conn, codec = "jpeg", width = b.Width, height = b.Height, fps = s.Capturer.Fps });
     }
 
     private void ApplyUrls(string[] urls)
@@ -402,12 +492,11 @@ internal sealed class AppController : IDisposable
 
     public void Dispose()
     {
-        _resizeTimer?.Dispose();
+        foreach (var t in _resizeTimers.Values) t.Dispose();
         _cursor.Dispose();
-        _capturer.Dispose();
         _source.Dispose();
         _server.Dispose();
-        _monitor?.Dispose(); // remove o monitor virtual
-        _monitor = null;
+        foreach (var s in _screens) s.Dispose(); // remove os monitores virtuais
+        _screens.Clear();
     }
 }

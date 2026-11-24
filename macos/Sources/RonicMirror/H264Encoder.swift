@@ -1,4 +1,5 @@
 import CoreMedia
+import QuartzCore
 import Foundation
 import VideoToolbox
 
@@ -64,23 +65,39 @@ final class H264Encoder {
     }
 
     private func makeSession(width: Int, height: Int) -> Bool {
+        // Modo de baixa latência do VideoToolbox (feito para videochamadas): sem "olhar à frente",
+        // sem picos de tamanho e cada frame sai assim que é codificado. Se não existir, usa o normal.
         var s: VTCompressionSession?
-        let status = VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
+        var lowLatency = true
+        var status = VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
+                                                codecType: kCMVideoCodecType_H264,
+                                                encoderSpecification: [kVTVideoEncoderSpecification_EnableLowLatencyRateControl: kCFBooleanTrue] as CFDictionary,
+                                                imageBufferAttributes: nil, compressedDataAllocator: nil,
+                                                outputCallback: nil, refcon: nil, compressionSessionOut: &s)
+        if status != noErr {
+            lowLatency = false
+            status = VTCompressionSessionCreate(allocator: nil, width: Int32(width), height: Int32(height),
                                                 codecType: kCMVideoCodecType_H264, encoderSpecification: nil,
                                                 imageBufferAttributes: nil, compressedDataAllocator: nil,
                                                 outputCallback: nil, refcon: nil, compressionSessionOut: &s)
+        }
         guard status == noErr, let s else { return false }
 
-        // Taxa de bits proporcional à área: ~10 Mbps para 1366×1024 a 60 fps (limitada entre 4 e 30 Mbps).
-        let bitrate = min(max(Double(width * height * fps) * 0.12, 4_000_000), 30_000_000)
+        // Taxa de bits proporcional à área: ~6 Mbps para 1180×820 a 60 fps (entre 3 e 20 Mbps),
+        // leve o bastante para não congestionar o Wi-Fi (congestionamento = atraso).
+        let bitrate = min(max(Double(width * height * fps) * 0.1, 3_000_000), 20_000_000)
         let set = { (key: CFString, value: CFTypeRef) in VTSessionSetProperty(s, key: key, value: value) }
         set(kVTCompressionPropertyKey_RealTime, kCFBooleanTrue)
         set(kVTCompressionPropertyKey_AllowFrameReordering, kCFBooleanFalse) // sem B-frames = sem atraso extra
-        set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel)
+        if lowLatency, #available(macOS 12.0, *) {
+            set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_ConstrainedHigh_AutoLevel)
+        } else {
+            set(kVTCompressionPropertyKey_ProfileLevel, kVTProfileLevel_H264_High_AutoLevel)
+        }
         set(kVTCompressionPropertyKey_AverageBitRate, NSNumber(value: bitrate))
         set(kVTCompressionPropertyKey_DataRateLimits, [NSNumber(value: bitrate / 8 * 1.5), NSNumber(value: 1)] as CFArray)
         set(kVTCompressionPropertyKey_ExpectedFrameRate, NSNumber(value: fps))
-        set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 5)) // recuperação periódica
+        set(kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, NSNumber(value: 2)) // recuperação rápida se algo se perder
         set(kVTCompressionPropertyKey_MaxFrameDelayCount, NSNumber(value: 0))
         VTCompressionSessionPrepareToEncodeFrames(s)
 
@@ -120,21 +137,31 @@ final class H264Encoder {
     }
 }
 
-/// Decide, frame a frame, entre H.264 (quando todos os aparelhos suportam) e JPEG (compatibilidade).
+/// Decide, frame a frame, entre H.264 (quando o aparelho suporta) e JPEG (compatibilidade),
+/// e endereça cada mensagem ao aparelho dono desta tela (prefixo 0xA0 + conn).
 final class FrameRouter {
     enum Codec: String { case jpeg, h264 }
 
     private let lock = NSLock()
     private var codec: Codec = .jpeg
-    private let jpeg = JPEGEncoder(quality: 0.6)
+    private let jpeg = JPEGEncoder(quality: 0.5)
+    private var lastJPEG: CFTimeInterval = 0
     let h264: H264Encoder
     private let source: SourceClient
+    private let prefix: Data
 
-    init(source: SourceClient, fps: Int) {
+    init(source: SourceClient, fps: Int, target: String) {
         self.source = source
+        prefix = FrameRouter.prefix(for: target)
         h264 = H264Encoder(fps: fps)
-        h264.onPacket = { [source] packet in source.sendOrdered(packet) }
-        source.onOverflow = { [weak h264] in h264?.requestKeyFrame() }
+        let prefix = self.prefix
+        h264.onPacket = { [source] packet in source.sendOrdered(prefix + packet) }
+    }
+
+    /// 0xA0 + tamanho + conn: o servidor entrega a mensagem só ao aparelho "conn".
+    static func prefix(for conn: String) -> Data {
+        let bytes = Array(conn.utf8.prefix(255))
+        return Data([0xA0, UInt8(bytes.count)] + bytes)
     }
 
     var currentCodec: Codec {
@@ -158,7 +185,11 @@ final class FrameRouter {
         case .h264:
             h264.encode(pixelBuffer, pts: pts)
         case .jpeg:
-            if let data = jpeg.encode(pixelBuffer) { source.sendFrame(data) }
+            // JPEG é ~10× mais pesado que H.264: no máximo 30 fps para não afogar o Wi-Fi.
+            let now = CACurrentMediaTime()
+            guard now - lastJPEG >= 1.0 / 31 else { return }
+            lastJPEG = now
+            if let data = jpeg.encode(pixelBuffer) { source.sendFrame(prefix + data) }
         }
     }
 }

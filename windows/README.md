@@ -16,10 +16,12 @@ Ele segue o mesmo contrato do app do macOS: [`docs/PROTOCOL.md`](../docs/PROTOCO
 | `ApprovalForm.cs` | "Aparelho X quer usar esta tela": Aceitar / Recusar / Bloquear + "Confiar neste aparelho" | `NSAlert` em `AppModel.swift` |
 | `ArrangementControl.cs` | Editor visual: desenha os monitores e permite arrastar a tela do Ronic Mirror | `DisplayArrangementView` em `ContentView.swift` |
 | `CursorStreamer.cs` | Cursor fora do vídeo: posição até 120×/s + formato em PNG | `CursorStreamer.swift` |
+| `DeviceScreen.cs` | A tela de um aparelho: monitor virtual próprio + captura endereçada a ele | `DeviceScreen.swift` |
+| `InputInjector.cs` | Toques do aparelho → mouse (`SendInput`): clique, clique direito, rolagem, arrastar | `InputInjector.swift` |
 | `AppController.cs` | Orquestração: monitor → captura → servidor | `AppModel.swift` |
 | `ParsecVdd.cs` | Porte do [parsec-vdd.h](https://github.com/nomi-san/parsec-vdd): SetupAPI + `DeviceIoControl`, com keep-alive a cada 50 ms | `CGVirtualDisplay` (bridge) |
 | `VirtualMonitor.cs` | Cria o monitor, escolhe a resolução mais próxima da do aparelho e posiciona com `ChangeDisplaySettingsEx` (`DM_POSITION`): Esquerda/Direita/Acima/Abaixo ou posição livre, sempre "grudando" na borda mais próxima | `VirtualDisplay.swift` |
-| `ScreenCapturer.cs` | Captura **só a área do monitor virtual** (GDI) a até 60 fps, desenha o cursor e detecta mudança. A codificação JPEG roda numa segunda thread, em paralelo com a captura | `ScreenCapturer.swift` + `H264Encoder.swift` |
+| `ScreenCapturer.cs` | Captura **só a área do monitor virtual** (GDI) a até 30 fps (JPEG), sem o cursor (que vai separado) e detecta mudança. A codificação JPEG roda numa segunda thread, em paralelo com a captura | `ScreenCapturer.swift` + `H264Encoder.swift` |
 | `ServerProcess.cs` | Inicia `core-server.exe --exit-on-stdin-close` e lê os eventos JSON | `CoreServerProcess.swift` |
 | `SourceClient.cs` | `ClientWebSocket` → `ws://127.0.0.1:PORT/source` | `SourceClient.swift` |
 

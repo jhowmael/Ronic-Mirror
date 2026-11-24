@@ -156,15 +156,15 @@ internal sealed class VirtualMonitor : IDisposable
     }
 
     /// <summary>Todos os monitores ativos, para o editor visual.</summary>
-    public static List<DisplayTileInfo> Layout(string? virtualDevice)
+    public static List<DisplayTileInfo> Layout(IReadOnlyDictionary<string, string> virtualNames)
     {
         var list = new List<DisplayTileInfo>();
         int n = 1;
         foreach (var (name, rect) in AttachedDisplays())
         {
-            bool isVirtual = name == virtualDevice;
+            bool isVirtual = virtualNames.ContainsKey(name);
             bool primary = rect.X == 0 && rect.Y == 0;
-            string label = isVirtual ? "Ronic Mirror" : primary ? "Este PC" : $"Monitor {++n}";
+            string label = isVirtual ? virtualNames[name] : primary ? "Este PC" : $"Monitor {++n}";
             list.Add(new DisplayTileInfo(name, rect, label, primary, isVirtual));
         }
         return list;

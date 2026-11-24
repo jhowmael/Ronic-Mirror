@@ -66,6 +66,22 @@ O computador e o aparelho precisam estar **na mesma rede Wi-Fi**.
    * **Android (Chrome):** menu ⋮ › Adicionar à tela inicial. No Android e no iPad, também dá para só tocar na tela para entrar em tela cheia.
 3. No app do computador, escolha **Esquerda** ou **Direita**, conforme o lado em que o aparelho está. Pronto: arraste janelas para ele.
 
+### Uma tela para cada aparelho
+
+Cada aparelho aceito ganha a **sua própria tela**, com o tamanho e o formato dele. Dá para ter o iPad à direita e o celular à esquerda, por exemplo. Quando o aparelho sai, a tela dele some e as janelas voltam para os outros monitores.
+
+### Controle por toque
+
+| Gesto no aparelho | No computador |
+|---|---|
+| Tocar com 1 dedo | Clique esquerdo (dois toques rápidos = clique duplo) |
+| Tocar com 2 dedos | Clique direito |
+| Arrastar (1 ou 2 dedos) | Rolagem |
+| Segurar parado meio segundo e arrastar | Clicar e arrastar (mover janelas, selecionar texto) |
+| Tocar com 3 dedos | Mostrar ou esconder as estatísticas |
+
+No **macOS**, a primeira vez que você tocar, o sistema pede a permissão de **Acessibilidade** (Ajustes do Sistema › Privacidade e Segurança › Acessibilidade › RonicMirror). Ela é necessária para o app clicar por você. No **Windows**, não é preciso nada.
+
 ### Quem pode ver sua tela
 
 Por padrão, **nenhum aparelho vê sua tela sem a sua autorização**. Quando um aparelho abre o link, o computador mostra "**iPad (Safari) quer usar esta tela**" com as opções **Aceitar**, **Recusar** e **Bloquear**. Marque "Confiar neste aparelho" para ele entrar direto nas próximas vezes.
@@ -74,7 +90,7 @@ Na aba **Aparelhos** você vê quem está conectado (nome, IP, há quanto tempo,
 
 ### Posição da tela (como em Ajustes › Monitores / Configurações › Tela)
 
-Na aba **Telas** aparecem todos os seus monitores em escala. **Arraste a tela do Ronic Mirror** para onde quiser: à esquerda, à direita, acima, abaixo, um pouco mais alta ou mais baixa. Ao soltar, ela **gruda na borda** do monitor mais próximo. Também há os botões rápidos **Esquerda, Direita, Acima e Abaixo**, que ficam ainda no menu do ícone.
+Na aba **Telas** aparecem todos os seus monitores em escala. **Arraste a tela de cada aparelho** para onde quiser: à esquerda, à direita, acima, abaixo, um pouco mais alta ou mais baixa. Ao soltar, ela **gruda na borda** do monitor mais próximo. Também há os botões rápidos **Esquerda, Direita, Acima e Abaixo**, que ficam ainda no menu do ícone.
 
 ### Rodando em segundo plano
 
@@ -162,9 +178,9 @@ O workflow [release.yml](.github/workflows/release.yml) compila o app do macOS (
 
 ## Limitações conhecidas
 
-* **Somente imagem:** tocar na tela do aparelho ainda não controla o computador. Use o mouse e o teclado do computador.
-* **60 fps em H.264** precisa de Safari 16.4+ (iPadOS/iOS 16.4) ou Chrome no Android. Aparelhos mais antigos recebem JPEG, que usa muito mais banda (15 a 60 Mbps) e pode travar em Wi-Fi fraco.
-* **Windows ainda usa JPEG:** atinge 60 fps em PCs bons, mas usa mais banda e CPU que o H.264 do Mac. Captura via DXGI + H.264 (Media Foundation) é o próximo passo.
+* **60 fps em H.264** precisa de Safari 16.4+ (iPadOS/iOS 16.4) ou Chrome no Android. Aparelhos mais antigos recebem JPEG, limitado a 30 fps porque usa muito mais banda.
+* **Wi-Fi:** prefira a rede de **5 GHz** (ou Wi-Fi 6) com o computador perto do roteador ou ligado por cabo. Num Wi-Fi fraco, o Ronic Mirror pula imagens em vez de atrasar, mas a fluidez cai.
+* **Windows ainda usa JPEG, a 30 fps:** é mais pesado que o H.264 do Mac. Captura via DXGI + H.264 (Media Foundation) é o próximo passo para chegar a 60 fps no Windows.
 * **macOS:** `CGVirtualDisplay` é uma API privada da Apple. Ela funciona (a mesma técnica é usada pelo DeskPad e pelo BetterDisplay), mas impede a publicação na Mac App Store.
 * **Windows:** o monitor virtual usa o [Parsec Virtual Display Driver](https://github.com/nomi-san/parsec-vdd) (gratuito e assinado), que oferece resoluções fixas. O app escolhe a mais próxima da do aparelho, então podem aparecer faixas pretas finas, principalmente em celulares, que têm tela mais alongada. A captura é feita por GDI, que é compatível com tudo mas usa mais CPU do que DXGI.
 * **Celular deitado no Mac:** o monitor virtual tem altura mínima de 640 pixels, então em celulares deitados aparecem faixas pretas nas laterais.

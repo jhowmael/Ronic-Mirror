@@ -29,6 +29,7 @@
   let h264Supported = false; // definido por probeH264() antes de conectar
   let authState = "pending"; // pending | accepted | rejected | kicked | blocked
   let stopReconnect = false;
+  let serverVersion = null; // versão do computador quando a página abriu
 
   // ---------- Identificação do aparelho (para o computador autorizar/bloquear) ----------
 
@@ -192,7 +193,13 @@
     cursorEl.src = url;
   }
 
-  function drawSource(source, width, height) {
+  // Tamanho oficial da tela virtual (mensagem "stream-info" do computador). Desenhar o frame
+  // SEMPRE nesse tamanho evita imagem esticada quando a resolução muda no meio da transmissão.
+  let streamSize = null;
+
+  function drawSource(source, frameWidth, frameHeight) {
+    const width = streamSize ? streamSize.w : frameWidth;
+    const height = streamSize ? streamSize.h : frameHeight;
     if (canvas.width !== width || canvas.height !== height) {
       canvas.width = width;
       canvas.height = height;
@@ -295,6 +302,8 @@
     if (!decoder || decoder.state === "closed") createDecoder();
     const codec = "avc1." + hex2(avcc[1]) + hex2(avcc[2]) + hex2(avcc[3]);
     try {
+      // Resolução/configuração nova: zera o decodificador antes (alguns navegadores mantêm o tamanho antigo).
+      if (decoder.state === "configured") decoder.reset();
       decoder.configure({ codec, description: avcc.slice(), optimizeForLatency: true, hardwareAcceleration: "prefer-hardware" });
       lastConfig = avcc.slice();
       needKey = true;
@@ -372,6 +381,16 @@
       }
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.type === "server") {
+        // O computador foi atualizado enquanto esta página estava aberta: recarrega para usar a versão nova.
+        if (serverVersion && msg.version !== serverVersion) { location.reload(); return; }
+        serverVersion = msg.version;
+        return;
+      }
+      if (msg.type === "stream-info") {
+        if (msg.width > 0 && msg.height > 0) streamSize = { w: msg.width, h: msg.height };
+        return;
+      }
       if (msg.type === "auth") {
         handleAuth(msg.state);
         return;
@@ -474,11 +493,108 @@
     updateOverlay();
   });
 
-  // Toque com 3 dedos: mostra/oculta estatísticas. Toque simples fora da tela cheia: volta à tela cheia.
-  canvas.addEventListener("touchstart", (e) => {
-    if (e.touches.length === 3) badge.hidden = !badge.hidden;
-  }, { passive: true });
-  canvas.addEventListener("click", () => { enterFullscreen(); keepAwake(); });
+  // ---------- Toque → mouse no computador ----------
+  //   1 dedo, toque rápido ........ clique esquerdo (dois toques = clique duplo)
+  //   2 dedos, toque rápido ....... clique direito
+  //   arrastar (1 ou 2 dedos) ..... rolagem
+  //   segurar parado e arrastar ... clicar e arrastar (mover janelas, selecionar texto)
+  //   3 dedos ..................... mostra/oculta as estatísticas
+
+  const TAP_MAX_MS = 350;
+  const TAP_MAX_MOVE = 10; // px
+  const HOLD_MS = 450;
+  let gesture = null;
+
+  function centroid(touches) {
+    let x = 0, y = 0;
+    for (const t of touches) { x += t.clientX; y += t.clientY; }
+    return { x: x / touches.length, y: y / touches.length };
+  }
+
+  function toScreen(p) {
+    return {
+      x: Math.min(Math.max((p.x - canvasRect.left) / canvasRect.width, 0), 1),
+      y: Math.min(Math.max((p.y - canvasRect.top) / canvasRect.height, 0), 1),
+    };
+  }
+
+  function sendInput(kind, p, extra) {
+    if (authState !== "accepted" || !receivedFrame || !canvasRect.width) return;
+    const q = toScreen(p);
+    send(Object.assign({ type: "input", kind, x: q.x, y: q.y }, extra || {}));
+  }
+
+  function controlling() {
+    return overlay.classList.contains("hidden") && authState === "accepted" && receivedFrame;
+  }
+
+  document.addEventListener("touchstart", (e) => {
+    if (!controlling()) return; // com o aviso aberto, o toque é para o aviso (tela cheia)
+    e.preventDefault();
+    if (e.touches.length >= 3) {
+      if (gesture && gesture.mode === "drag") sendInput("up", gesture.last);
+      if (gesture) clearTimeout(gesture.holdTimer);
+      gesture = { mode: "ignore" };
+      badge.hidden = !badge.hidden;
+      return;
+    }
+    const c = centroid(e.touches);
+    if (!gesture) {
+      gesture = { mode: "none", start: c, startTime: performance.now(), last: c, fingers: e.touches.length };
+      if (e.touches.length === 1) {
+        gesture.holdTimer = setTimeout(() => {
+          if (gesture && gesture.mode === "none") {
+            gesture.mode = "drag";
+            sendInput("down", gesture.last);
+            if (navigator.vibrate) navigator.vibrate(12);
+          }
+        }, HOLD_MS);
+      }
+    } else if (gesture.mode !== "ignore") {
+      gesture.fingers = Math.max(gesture.fingers, e.touches.length);
+      clearTimeout(gesture.holdTimer);
+      gesture.last = c;
+    }
+  }, { passive: false });
+
+  document.addEventListener("touchmove", (e) => {
+    if (!gesture || gesture.mode === "ignore") return;
+    e.preventDefault();
+    const c = centroid(e.touches);
+    if (gesture.mode === "none" && Math.hypot(c.x - gesture.start.x, c.y - gesture.start.y) > TAP_MAX_MOVE) {
+      clearTimeout(gesture.holdTimer);
+      gesture.mode = "scroll";
+    }
+    if (gesture.mode === "scroll") {
+      const dx = (c.x - gesture.last.x) / canvasRect.width;
+      const dy = (c.y - gesture.last.y) / canvasRect.height;
+      if (dx || dy) sendInput("scroll", c, { dx, dy });
+    } else if (gesture.mode === "drag") {
+      sendInput("move", c);
+    }
+    gesture.last = c;
+  }, { passive: false });
+
+  function endGesture(e, cancelled) {
+    if (!gesture) return;
+    e.preventDefault();
+    if (e.touches.length > 0) { // ainda há dedos na tela
+      if (gesture.mode !== "ignore") gesture.last = centroid(e.touches);
+      return;
+    }
+    clearTimeout(gesture.holdTimer);
+    const quick = performance.now() - gesture.startTime < TAP_MAX_MS;
+    if (gesture.mode === "none" && quick && !cancelled) {
+      sendInput(gesture.fingers >= 2 ? "rtap" : "tap", gesture.start);
+    } else if (gesture.mode === "drag") {
+      sendInput("up", gesture.last);
+    }
+    gesture = null;
+    if (!isFullscreen()) enterFullscreen();
+    keepAwake();
+  }
+  document.addEventListener("touchend", (e) => endGesture(e, false), { passive: false });
+  document.addEventListener("touchcancel", (e) => endGesture(e, true), { passive: false });
 
   document.addEventListener("gesturestart", (e) => e.preventDefault()); // bloqueia zoom por pinça
 

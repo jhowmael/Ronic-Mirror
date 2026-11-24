@@ -10,12 +10,18 @@ namespace RonicMirror;
 /// </summary>
 internal sealed class ArrangementControl : Control
 {
-    public event Action<Point>? Moved;
+    /// <summary>(nome do monitor arrastado, origem desejada)</summary>
+    public event Action<string, Point>? Moved;
+    /// <summary>Tela do Ronic Mirror clicada/arrastada (para os botões de posição rápida).</summary>
+    public event Action<string>? Selected;
+    [System.ComponentModel.DesignerSerializationVisibility(System.ComponentModel.DesignerSerializationVisibility.Hidden)]
+    public string? SelectedDevice { get; set; }
 
     private List<DisplayTileInfo> _displays = new();
     private float _scale;
     private PointF _origin;
     private bool _dragging;
+    private DisplayTileInfo? _dragTile;
     private Point _dragStart;
     private Size _dragOffset;
 
@@ -54,10 +60,10 @@ internal sealed class ArrangementControl : Control
         if (!_dragging) ComputeTransform();
         if (_scale <= 0) return;
 
-        foreach (var d in _displays.OrderBy(d => d.IsVirtual))
+        foreach (var d in _displays.OrderBy(d => d == _dragTile ? 2 : d.IsVirtual ? 1 : 0))
         {
             var r = ToScreen(d.Frame);
-            if (d.IsVirtual && _dragging) r.Offset(_dragOffset.Width, _dragOffset.Height);
+            if (_dragging && d == _dragTile) r.Offset(_dragOffset.Width, _dragOffset.Height);
             r.Inflate(-1, -1);
             using var path = Rounded(r, 6);
 
@@ -65,7 +71,8 @@ internal sealed class ArrangementControl : Control
             {
                 using var brush = new LinearGradientBrush(r, Color.FromArgb(34, 228, 245), Color.FromArgb(0, 131, 176), 45f);
                 g.FillPath(brush, path);
-                using var pen = new Pen(Color.FromArgb(200, 255, 255, 255), 1.5f);
+                bool selected = d.DeviceName == SelectedDevice;
+                using var pen = new Pen(selected ? Color.FromArgb(0, 90, 200) : Color.FromArgb(200, 255, 255, 255), selected ? 3f : 1.5f);
                 g.DrawPath(pen, path);
             }
             else
@@ -104,11 +111,8 @@ internal sealed class ArrangementControl : Control
         return p;
     }
 
-    private DisplayTileInfo? VirtualAt(Point p)
-    {
-        var v = _displays.FirstOrDefault(d => d.IsVirtual);
-        return v != null && ToScreen(v.Frame).Contains(p) ? v : null;
-    }
+    private DisplayTileInfo? VirtualAt(Point p) =>
+        _displays.LastOrDefault(d => d.IsVirtual && ToScreen(d.Frame).Contains(p));
 
     protected override void OnMouseMove(MouseEventArgs e)
     {
@@ -127,7 +131,11 @@ internal sealed class ArrangementControl : Control
     protected override void OnMouseDown(MouseEventArgs e)
     {
         base.OnMouseDown(e);
-        if (e.Button != MouseButtons.Left || VirtualAt(e.Location) == null) return;
+        var tile = e.Button == MouseButtons.Left ? VirtualAt(e.Location) : null;
+        if (tile == null) return;
+        _dragTile = tile;
+        SelectedDevice = tile.DeviceName;
+        Selected?.Invoke(tile.DeviceName);
         _dragging = true;
         _dragStart = e.Location;
         _dragOffset = Size.Empty;
@@ -140,12 +148,13 @@ internal sealed class ArrangementControl : Control
         if (!_dragging) return;
         _dragging = false;
         Capture = false;
-        var v = _displays.FirstOrDefault(d => d.IsVirtual);
+        var v = _dragTile;
+        _dragTile = null;
         if (v != null && _scale > 0 && (_dragOffset.Width != 0 || _dragOffset.Height != 0))
         {
             var target = new Point(v.Frame.X + (int)Math.Round(_dragOffset.Width / _scale),
                                    v.Frame.Y + (int)Math.Round(_dragOffset.Height / _scale));
-            Moved?.Invoke(target);
+            Moved?.Invoke(v.DeviceName, target);
         }
         _dragOffset = Size.Empty;
         Invalidate();
