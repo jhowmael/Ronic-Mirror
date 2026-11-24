@@ -1,0 +1,91 @@
+name: Release
+
+# Publica os downloads no GitHub Releases ao criar uma tag "v*":
+#   git tag v0.1.0 && git push origin v0.1.0
+# Também pode ser disparado manualmente (gera só os artefatos do workflow, sem Release).
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: core-server/go.sum
+
+      - name: Versão
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.0-dev"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: Empacotar (universal arm64 + x86_64)
+        run: UNIVERSAL=1 ./scripts/package-macos.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: dist/RonicMirror-macOS.zip
+
+  windows:
+    # O .exe é compilado em Linux (EnableWindowsTargeting): mais rápido e com o mesmo resultado.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+          cache-dependency-path: core-server/go.sum
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "10.0.x"
+
+      - name: Versão
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.0-dev"; fi
+          echo "VERSION=$V" >> "$GITHUB_ENV"
+
+      - name: Empacotar (x64)
+        run: ./scripts/package-windows.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/RonicMirror-Windows.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publicar no Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: Ronic Mirror ${{ github.ref_name }}
+          generate_release_notes: true
+          body: |
+            ## Downloads
+            | Sistema | Arquivo |
+            |---|---|
+            | macOS 13+ (Apple Silicon e Intel) | **RonicMirror-macOS.zip** |
+            | Windows 10/11 (64 bits) | **RonicMirror-Windows.zip** |
+
+            Instruções de uso: veja o [README](https://github.com/jhowmael/Ronic---Mirror#como-usar).
+          files: |
+            dist/RonicMirror-macOS.zip
+            dist/RonicMirror-Windows.zip

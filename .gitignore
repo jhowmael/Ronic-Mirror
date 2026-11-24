@@ -1,0 +1,10 @@
+.DS_Store
+/build/
+/dist/
+/core-server/bin/
+/macos/.build/
+/macos/.swiftpm/
+*.xcodeproj/xcuserdata/
+/windows/**/bin/
+/windows/**/obj/
+/branding/out/

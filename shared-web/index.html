@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Ronic Mirror">
+  <meta name="theme-color" content="#000000">
+  <title>Ronic Mirror</title>
+  <link rel="icon" type="image/png" href="favicon.png">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <canvas id="screen" aria-label="Tela estendida"></canvas>
+
+  <div id="overlay" role="button" tabindex="0">
+    <div class="card">
+      <img class="logo" src="logo.png" alt="" width="88" height="88">
+      <h1>Ronic Mirror</h1>
+      <p id="status">Conectando…</p>
+      <p class="hint">Toque para entrar em tela cheia</p>
+      <p class="tip">Dica: no Safari, “Compartilhar → Adicionar à Tela de Início” abre sem barras.</p>
+    </div>
+  </div>
+
+  <div id="badge" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
