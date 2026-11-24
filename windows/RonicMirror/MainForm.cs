@@ -79,7 +79,7 @@ internal sealed class MainForm : Form
         });
         var titles = new FlowLayoutPanel { FlowDirection = FlowDirection.TopDown, AutoSize = true, WrapContents = false };
         titles.Controls.Add(new Label { Text = "Ronic Mirror", Font = new Font("Segoe UI Semibold", 16f), AutoSize = true });
-        titles.Controls.Add(new Label { Text = "Use o iPad como monitor estendido via Wi-Fi", ForeColor = Color.DimGray, AutoSize = true });
+        titles.Controls.Add(new Label { Text = "Use o iPad, tablet ou celular como segundo monitor via Wi-Fi", ForeColor = Color.DimGray, AutoSize = true });
         header.Controls.Add(titles);
         root.Controls.Add(header);
 
@@ -105,7 +105,7 @@ internal sealed class MainForm : Form
         root.Controls.Add(_driverPanel);
 
         // 1. Link
-        root.Controls.Add(SectionTitle("1. No iPad, abra no Safari"));
+        root.Controls.Add(SectionTitle("1. No iPad, tablet ou celular, abra no navegador"));
         var linkRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false, Margin = new Padding(0, 4, 0, 4) };
         _qr.Size = new Size(110, 110);
         _qr.SizeMode = PictureBoxSizeMode.Zoom;
@@ -125,7 +125,7 @@ internal sealed class MainForm : Form
         _copy.Padding = new Padding(8, 2, 8, 2);
         _copy.Click += (_, _) => CopyUrl();
         linkCol.Controls.Add(_copy);
-        linkCol.Controls.Add(new Label { Text = "Ou aponte a câmera do iPad para o QR code.", ForeColor = Color.DimGray, AutoSize = true, Margin = new Padding(0, 6, 0, 0) });
+        linkCol.Controls.Add(new Label { Text = "Ou aponte a câmera do aparelho para o QR code.", ForeColor = Color.DimGray, AutoSize = true, Margin = new Padding(0, 6, 0, 0) });
         linkRow.Controls.Add(linkCol);
         root.Controls.Add(linkRow);
         _others.ForeColor = Color.DimGray;
@@ -134,7 +134,7 @@ internal sealed class MainForm : Form
         root.Controls.Add(_others);
 
         // 2. Posição
-        root.Controls.Add(SectionTitle("2. Posição do iPad em relação ao PC"));
+        root.Controls.Add(SectionTitle("2. Posição do aparelho em relação ao PC"));
         var sideRow = new FlowLayoutPanel { AutoSize = true, WrapContents = false };
         _left.Text = "Esquerda";
         _left.AutoSize = true;
@@ -184,7 +184,7 @@ internal sealed class MainForm : Form
         menu.Items.Add(new ToolStripSeparator());
         menu.Items.Add("Abrir Ronic Mirror", null, (_, _) => ShowWindow());
         menu.Items.Add("Copiar link", null, (_, _) => CopyUrl());
-        var position = new ToolStripMenuItem("Posição do iPad");
+        var position = new ToolStripMenuItem("Posição do aparelho");
         _trayLeft.Click += (_, _) => _app.SetPosition(DisplaySide.Left);
         _trayRight.Click += (_, _) => _app.SetPosition(DisplaySide.Right);
         position.DropDownItems.AddRange(new ToolStripItem[] { _trayLeft, _trayRight });
@@ -211,7 +211,7 @@ internal sealed class MainForm : Form
             {
                 _trayHintShown = true;
                 _tray.ShowBalloonTip(4000, "Ronic Mirror continua rodando",
-                    "O iPad segue funcionando. Use o ícone na bandeja para abrir ou sair.", ToolTipIcon.Info);
+                    "O aparelho conectado segue funcionando. Use o ícone na bandeja para abrir ou sair.", ToolTipIcon.Info);
             }
             return;
         }
@@ -256,15 +256,15 @@ internal sealed class MainForm : Form
         _trayRight.Checked = _right.Checked;
 
         SetStatus(_serverStatus, "Servidor local", _app.ServerStatus, _app.ServerError);
-        SetStatus(_displayStatus, $"Monitor virtual {_app.Resolution}", _app.DisplayStatus, _app.DisplayError);
-        _viewers.Text = (_app.Viewers == 1 ? "📱 1 iPad conectado" : $"📱 {_app.Viewers} iPads conectados");
+        SetStatus(_displayStatus, $"Monitor virtual {_app.Resolution} · até 60 fps", _app.DisplayStatus, _app.DisplayError);
+        _viewers.Text = (_app.Viewers == 1 ? "📱 1 aparelho conectado" : $"📱 {_app.Viewers} aparelhos conectados");
         _viewers.ForeColor = _app.Viewers > 0 ? Color.SeaGreen : Color.DimGray;
 
         _driverPanel.Visible = _app.DriverMissing;
         _installDriver.Enabled = !_app.InstallingDriver;
         _installDriver.Text = _app.InstallingDriver ? "Instalando…" : "Instalar driver";
 
-        _tray.Text = _app.Viewers > 0 ? $"Ronic Mirror — {_app.Viewers} iPad(s)" : "Ronic Mirror";
+        _tray.Text = _app.Viewers > 0 ? $"Ronic Mirror — {_app.Viewers} aparelho(s)" : "Ronic Mirror";
     }
 
     private static void SetStatus(Label label, string title, Status status, string? error)

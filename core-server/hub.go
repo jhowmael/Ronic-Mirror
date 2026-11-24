@@ -15,9 +15,18 @@ import (
 const (
 	maxFrameBytes = 64 << 20 // 64 MB: limite de leitura de um frame vindo da fonte
 	writeTimeout  = 5 * time.Second
+	videoQueueLen = 120 // ~2 s de vídeo a 60 fps por viewer
 )
 
-// Resolution é o tamanho de tela informado por um viewer (iPad), em pontos CSS.
+// Tipos de frame binário (primeiro byte). Ver docs/PROTOCOL.md.
+const (
+	frameH264Config = 0x10 // avcC (AVCDecoderConfigurationRecord)
+	frameH264Key    = 0x11 // quadro-chave: 8 bytes de timestamp (µs, BE) + NALs AVCC
+	frameH264Delta  = 0x12 // quadro delta: idem
+	frameJPEG       = 0xFF // JPEG puro (começa com FF D8)
+)
+
+// Resolution é o tamanho de tela informado por um viewer, em pontos CSS.
 type Resolution struct {
 	Width  int     `json:"width"`
 	Height int     `json:"height"`
@@ -26,27 +35,44 @@ type Resolution struct {
 
 type peer struct {
 	conn   *websocket.Conn
-	frames chan []byte // capacidade 1: sempre o frame mais recente (latest-frame-wins)
+	frames chan []byte // fila ordenada de frames binários
 	ctrl   chan []byte // mensagens de texto (JSON)
 	cancel context.CancelFunc
+
+	// Somente viewers (protegidos por Hub.mu):
+	h264    bool // o navegador decodifica H.264 (WebCodecs)
+	needKey bool // aguardando um quadro-chave antes de receber deltas
 }
 
 func newPeer(c *websocket.Conn, cancel context.CancelFunc) *peer {
-	return &peer{conn: c, frames: make(chan []byte, 1), ctrl: make(chan []byte, 32), cancel: cancel}
+	return &peer{conn: c, frames: make(chan []byte, videoQueueLen), ctrl: make(chan []byte, 32), cancel: cancel, needKey: true}
 }
 
-// pushFrame substitui qualquer frame pendente pelo novo — um iPad lento nunca acumula atraso.
-func (p *peer) pushFrame(f []byte) {
+// pushLatest descarta o que estiver pendente e enfileira só o frame novo (JPEG: latest-frame-wins).
+func (p *peer) pushLatest(f []byte) {
+	p.drain()
 	select {
 	case p.frames <- f:
 	default:
+	}
+}
+
+// pushOrdered enfileira sem descartar (vídeo H.264). Retorna false se a fila estiver cheia.
+func (p *peer) pushOrdered(f []byte) bool {
+	select {
+	case p.frames <- f:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *peer) drain() {
+	for {
 		select {
 		case <-p.frames:
 		default:
-		}
-		select {
-		case p.frames <- f:
-		default:
+			return
 		}
 	}
 }
@@ -58,7 +84,7 @@ func (p *peer) pushCtrl(v any) {
 	}
 	select {
 	case p.ctrl <- b:
-	default: // fila cheia: descarta mensagem de controle antiga é aceitável
+	default: // fila cheia: descartar mensagem de controle antiga é aceitável
 	}
 }
 
@@ -91,9 +117,11 @@ type Hub struct {
 	mu          sync.Mutex
 	source      *peer
 	viewers     map[*peer]struct{}
-	lastFrame   []byte
+	lastFrame   []byte          // último JPEG (enviado na hora a quem conecta)
 	streamInfo  json.RawMessage // última mensagem "stream-info" da fonte
 	lastViewRes *Resolution
+	lastKeyReq  time.Time
+	lastH264    bool // último valor de "h264" informado à fonte
 }
 
 func newHub(port int) *Hub {
@@ -124,9 +152,9 @@ func (h *Hub) handleSource(w http.ResponseWriter, r *http.Request) {
 		old.cancel() // só uma fonte por vez: a nova substitui a antiga
 	}
 	h.source = src
-	viewerCount := len(h.viewers)
 	res := h.lastViewRes
 	for v := range h.viewers {
+		v.needKey = true
 		v.pushCtrl(map[string]any{"type": "source", "connected": true})
 	}
 	h.mu.Unlock()
@@ -135,7 +163,9 @@ func (h *Hub) handleSource(w http.ResponseWriter, r *http.Request) {
 	go src.writeLoop(ctx)
 
 	src.pushCtrl(map[string]any{"type": "server-info", "version": version, "port": h.port, "urls": viewerURLs(h.port)})
-	src.pushCtrl(map[string]any{"type": "viewers", "count": viewerCount})
+	h.mu.Lock()
+	h.notifyViewersLocked()
+	h.mu.Unlock()
 	if res != nil {
 		src.pushCtrl(map[string]any{"type": "viewer-resolution", "width": res.Width, "height": res.Height, "dpr": res.DPR})
 	}
@@ -147,7 +177,9 @@ func (h *Hub) handleSource(w http.ResponseWriter, r *http.Request) {
 		}
 		switch typ {
 		case websocket.MessageBinary:
-			h.broadcastFrame(data)
+			if len(data) > 0 {
+				h.broadcastFrame(data)
+			}
 		case websocket.MessageText:
 			h.handleSourceText(data)
 		}
@@ -189,14 +221,75 @@ func (h *Hub) handleSourceText(data []byte) {
 
 func (h *Hub) broadcastFrame(f []byte) {
 	h.mu.Lock()
-	h.lastFrame = f
-	for v := range h.viewers {
-		v.pushFrame(f)
+	defer h.mu.Unlock()
+
+	switch f[0] {
+	case frameH264Config:
+		h.lastFrame = nil
+		for v := range h.viewers {
+			if v.h264 && !v.pushOrdered(f) {
+				h.overflowLocked(v)
+			}
+		}
+	case frameH264Key:
+		for v := range h.viewers {
+			if !v.h264 {
+				continue
+			}
+			if v.pushOrdered(f) {
+				v.needKey = false
+			} else {
+				h.overflowLocked(v)
+			}
+		}
+	case frameH264Delta:
+		for v := range h.viewers {
+			if !v.h264 || v.needKey {
+				continue
+			}
+			if !v.pushOrdered(f) {
+				h.overflowLocked(v)
+			}
+		}
+	default: // JPEG (ou formato desconhecido): sempre o mais recente
+		h.lastFrame = f
+		for v := range h.viewers {
+			v.pushLatest(f)
+		}
 	}
-	h.mu.Unlock()
 }
 
-// ---------- Viewers (iPads na rede local) ----------
+// overflowLocked: o viewer ficou para trás. Descarta a fila e espera o próximo quadro-chave.
+func (h *Hub) overflowLocked(v *peer) {
+	v.drain()
+	v.needKey = true
+	h.requestKeyFrameLocked()
+}
+
+func (h *Hub) requestKeyFrameLocked() {
+	if h.source == nil || time.Since(h.lastKeyReq) < 300*time.Millisecond {
+		return
+	}
+	h.lastKeyReq = time.Now()
+	h.source.pushCtrl(map[string]any{"type": "keyframe-request"})
+}
+
+// notifyViewersLocked informa à fonte quantos viewers existem e se TODOS decodificam H.264.
+func (h *Hub) notifyViewersLocked() {
+	if h.source == nil {
+		return
+	}
+	all := len(h.viewers) > 0
+	for v := range h.viewers {
+		if !v.h264 {
+			all = false
+		}
+	}
+	h.lastH264 = all
+	h.source.pushCtrl(map[string]any{"type": "viewers", "count": len(h.viewers), "h264": all})
+}
+
+// ---------- Viewers (iPad, tablet, celular, navegador) ----------
 
 func (h *Hub) handleViewer(w http.ResponseWriter, r *http.Request) {
 	c, err := websocket.Accept(w, r, nil)
@@ -219,12 +312,12 @@ func (h *Hub) handleViewer(w http.ResponseWriter, r *http.Request) {
 		v.ctrl <- h.streamInfo
 	}
 	if h.lastFrame != nil {
-		v.pushFrame(h.lastFrame)
+		v.pushLatest(h.lastFrame)
 	}
-	h.notifySourceLocked(map[string]any{"type": "viewers", "count": count})
+	h.notifyViewersLocked()
 	h.mu.Unlock()
 
-	log.Printf("iPad conectado (%s) — total: %d", r.RemoteAddr, count)
+	log.Printf("viewer conectado (%s) — total: %d", r.RemoteAddr, count)
 	go v.writeLoop(ctx)
 
 	for {
@@ -233,42 +326,62 @@ func (h *Hub) handleViewer(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 		if typ == websocket.MessageText {
-			h.handleViewerText(data)
+			h.handleViewerText(v, data)
 		}
 	}
 
 	h.mu.Lock()
 	delete(h.viewers, v)
 	count = len(h.viewers)
-	h.notifySourceLocked(map[string]any{"type": "viewers", "count": count})
+	h.notifyViewersLocked()
 	h.mu.Unlock()
-	log.Printf("iPad desconectado — total: %d", count)
+	log.Printf("viewer desconectado — total: %d", count)
 }
 
-func (h *Hub) handleViewerText(data []byte) {
+func (h *Hub) handleViewerText(v *peer, data []byte) {
 	var msg struct {
-		Type string `json:"type"`
+		Type   string   `json:"type"`
+		Codecs []string `json:"codecs"`
 		Resolution
 	}
 	if json.Unmarshal(data, &msg) != nil {
 		return
 	}
-	if msg.Type != "hello" && msg.Type != "resize" {
-		return
-	}
-	if msg.Width < 320 || msg.Height < 320 || msg.Width > 8192 || msg.Height > 8192 {
-		return
-	}
-	res := msg.Resolution
-	h.mu.Lock()
-	h.lastViewRes = &res
-	h.notifySourceLocked(map[string]any{"type": "viewer-resolution", "width": res.Width, "height": res.Height, "dpr": res.DPR})
-	h.mu.Unlock()
-}
 
-func (h *Hub) notifySourceLocked(v any) {
-	if h.source != nil {
-		h.source.pushCtrl(v)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Codecs suportados pelo navegador (no "hello" ou numa mensagem "codecs" de fallback).
+	if msg.Codecs != nil {
+		supports := false
+		for _, c := range msg.Codecs {
+			if c == "h264" {
+				supports = true
+			}
+		}
+		if supports != v.h264 {
+			v.h264 = supports
+			v.needKey = true
+			h.notifyViewersLocked()
+		}
+		if supports {
+			h.requestKeyFrameLocked()
+		}
+	}
+
+	switch msg.Type {
+	case "keyframe-request":
+		v.needKey = true
+		h.requestKeyFrameLocked()
+	case "hello", "resize":
+		if msg.Width < 320 || msg.Height < 320 || msg.Width > 8192 || msg.Height > 8192 {
+			return
+		}
+		res := msg.Resolution
+		h.lastViewRes = &res
+		if h.source != nil {
+			h.source.pushCtrl(map[string]any{"type": "viewer-resolution", "width": res.Width, "height": res.Height, "dpr": res.DPR})
+		}
 	}
 }
 
@@ -282,6 +395,7 @@ func (h *Hub) handleInfo(w http.ResponseWriter, _ *http.Request) {
 		"urls":            viewerURLs(h.port),
 		"sourceConnected": h.source != nil,
 		"viewers":         len(h.viewers),
+		"h264":            h.lastH264,
 	}
 	h.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")

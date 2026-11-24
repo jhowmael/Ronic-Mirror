@@ -215,6 +215,9 @@ internal sealed class AppController : IDisposable
                 Viewers = _viewers = msg.GetProperty("count").GetInt32();
                 if (_viewers > 0) _capturer.ForceNextFrame();
                 break;
+            case "keyframe-request":
+                _capturer.ForceNextFrame(); // no JPEG todo frame é completo: só reenvia a tela atual
+                break;
             case "viewer-resolution":
                 int w = msg.GetProperty("width").GetInt32(), h = msg.GetProperty("height").GetInt32();
                 // debounce: o iPad pode mandar várias mudanças seguidas ao girar

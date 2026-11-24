@@ -33,10 +33,10 @@ Ronic Mirror $VERSION para Windows
 1. Abra RonicMirror.exe.
 2. Na primeira vez, clique em "Instalar driver" (monitor virtual Parsec VDD) e confirme o pedido de administrador.
 3. Se o Firewall do Windows perguntar, permita o "core-server" em redes privadas.
-4. No iPad, abra no Safari o link mostrado na janela (ou leia o QR code).
+4. No iPad, tablet ou celular, abra no navegador o link mostrado na janela (ou leia o QR code).
 
 Ao fechar a janela, o app continua na bandeja do sistema. Para encerrar: botão direito no ícone > Sair.
-Mais informações: https://github.com/jhowmael/Ronic---Mirror
+Mais informações: https://github.com/jhowmael/Ronic-Mirror
 TXT
 
 (cd "$ROOT/dist" && rm -f "$ZIP" && \

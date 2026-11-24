@@ -1,4 +1,4 @@
-module github.com/jhowmael/Ronic---Mirror/core-server
+module github.com/jhowmael/Ronic-Mirror/core-server
 
 go 1.22
 

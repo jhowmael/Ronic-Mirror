@@ -1,6 +1,6 @@
-// Ronic Mirror — cliente web do iPad.
-// Recebe frames JPEG via WebSocket (/view) e desenha em um <canvas> em tela cheia.
-// Envia ao servidor a resolução da tela do iPad para o monitor virtual se ajustar.
+// Ronic Mirror — página aberta no iPad, tablet ou celular.
+// Recebe vídeo H.264 (WebCodecs, decodificado por hardware) ou JPEG via WebSocket (/view)
+// e desenha em um <canvas> em tela cheia. Envia a resolução da tela para o monitor virtual se ajustar.
 // Contrato: docs/PROTOCOL.md
 (() => {
   "use strict";
@@ -11,11 +11,17 @@
   const statusEl = document.getElementById("status");
   const badge = document.getElementById("badge");
 
+  const FRAME_H264_CONFIG = 0x10;
+  const FRAME_H264_KEY = 0x11;
+  const FRAME_H264_DELTA = 0x12;
+  const FRAME_JPEG = 0xff;
+
   let ws = null;
   let sourceConnected = false;
   let receivedFrame = false;
   let userDismissed = false;
   let wakeLock = null;
+  let h264Supported = false; // definido por probeH264() antes de conectar
 
   // ---------- Status / overlay ----------
 
@@ -28,6 +34,13 @@
   function updateOverlay() {
     const streaming = ws && ws.readyState === WebSocket.OPEN && sourceConnected && receivedFrame;
     overlay.classList.toggle("hidden", streaming && userDismissed);
+  }
+
+  function onFirstFrame() {
+    if (!receivedFrame) {
+      receivedFrame = true;
+      setStatus("Transmitindo", "ok");
+    }
   }
 
   // ---------- Resolução da tela ----------
@@ -46,10 +59,14 @@
     };
   }
 
+  function send(obj) {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+  }
+
   function sendResolution(type) {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify(Object.assign({ type }, screenSize())));
-    }
+    const msg = Object.assign({ type }, screenSize());
+    if (type === "hello") msg.codecs = h264Supported ? ["h264", "jpeg"] : ["jpeg"];
+    send(msg);
   }
 
   let resizeTimer = null;
@@ -75,51 +92,158 @@
     canvas.style.top = Math.round((vh - h) / 2) + "px";
   }
 
-  // ---------- Decodificação (sempre o frame mais recente) ----------
+  function drawSource(source, width, height) {
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width;
+      canvas.height = height;
+      layoutCanvas();
+    }
+    ctx.drawImage(source, 0, 0, width, height);
+    frames++;
+    onFirstFrame();
+  }
 
-  let pending = null;
-  let decoding = false;
+  // ---------- Estatísticas ----------
+
   let frames = 0;
   let bytes = 0;
-
-  function enqueueFrame(data) {
-    pending = data;
-    bytes += data.byteLength;
-    if (!decoding) decodeNext();
-  }
-
-  async function decodeNext() {
-    if (!pending) { decoding = false; return; }
-    decoding = true;
-    const data = pending;
-    pending = null;
-    try {
-      const bitmap = await createImageBitmap(new Blob([data], { type: "image/jpeg" }));
-      if (canvas.width !== bitmap.width || canvas.height !== bitmap.height) {
-        canvas.width = bitmap.width;
-        canvas.height = bitmap.height;
-        layoutCanvas();
-      }
-      ctx.drawImage(bitmap, 0, 0);
-      if (bitmap.close) bitmap.close();
-      frames++;
-      if (!receivedFrame) {
-        receivedFrame = true;
-        setStatus("Transmitindo", "ok");
-      }
-    } catch (e) {
-      console.warn("frame inválido", e);
-    }
-    decodeNext();
-  }
+  let codecLabel = "";
 
   setInterval(() => {
     if (!badge.hidden) {
-      badge.textContent = `${frames} fps · ${(bytes * 8 / 1e6).toFixed(1)} Mbps · ${canvas.width}×${canvas.height}`;
+      badge.textContent = `${codecLabel} · ${frames} fps · ${(bytes * 8 / 1e6).toFixed(1)} Mbps · ${canvas.width}×${canvas.height}`;
     }
     frames = 0;
     bytes = 0;
   }, 1000);
+
+  // ---------- JPEG (sempre o frame mais recente) ----------
+
+  let pendingJpeg = null;
+  let decodingJpeg = false;
+
+  function enqueueJpeg(data) {
+    codecLabel = "JPEG";
+    pendingJpeg = data;
+    if (!decodingJpeg) decodeNextJpeg();
+  }
+
+  async function decodeNextJpeg() {
+    if (!pendingJpeg) { decodingJpeg = false; return; }
+    decodingJpeg = true;
+    const data = pendingJpeg;
+    pendingJpeg = null;
+    try {
+      const bitmap = await createImageBitmap(new Blob([data], { type: "image/jpeg" }));
+      drawSource(bitmap, bitmap.width, bitmap.height);
+      if (bitmap.close) bitmap.close();
+    } catch (e) {
+      console.warn("JPEG inválido", e);
+    }
+    decodeNextJpeg();
+  }
+
+  // ---------- H.264 (WebCodecs, decodificação por hardware) ----------
+
+  let decoder = null;
+  let lastConfig = null; // bytes do avcC atualmente configurado
+  let needKey = true;
+  let decodeErrors = 0;
+
+  async function probeH264() {
+    if (typeof VideoDecoder !== "function" || typeof EncodedVideoChunk !== "function") return false;
+    try {
+      const r = await VideoDecoder.isConfigSupported({ codec: "avc1.640033", optimizeForLatency: true });
+      return !!r.supported;
+    } catch {
+      return false;
+    }
+  }
+
+  function hex2(n) { return n.toString(16).padStart(2, "0"); }
+
+  function sameBytes(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+    return true;
+  }
+
+  function createDecoder() {
+    decoder = new VideoDecoder({
+      output: (frame) => {
+        drawSource(frame, frame.displayWidth, frame.displayHeight);
+        frame.close();
+      },
+      error: (e) => {
+        console.warn("erro no decodificador H.264", e);
+        decodeErrors++;
+        lastConfig = null;
+        needKey = true;
+        if (decodeErrors >= 3) {
+          // Este aparelho não está dando conta: volta para JPEG.
+          h264Supported = false;
+          send({ type: "codecs", codecs: ["jpeg"] });
+        } else {
+          send({ type: "keyframe-request" });
+        }
+      },
+    });
+  }
+
+  function configureH264(avcc) {
+    if (sameBytes(avcc, lastConfig) && decoder && decoder.state === "configured") return;
+    if (!decoder || decoder.state === "closed") createDecoder();
+    const codec = "avc1." + hex2(avcc[1]) + hex2(avcc[2]) + hex2(avcc[3]);
+    try {
+      decoder.configure({ codec, description: avcc.slice(), optimizeForLatency: true, hardwareAcceleration: "prefer-hardware" });
+      lastConfig = avcc.slice();
+      needKey = true;
+    } catch (e) {
+      console.warn("configuração H.264 recusada", e);
+      h264Supported = false;
+      send({ type: "codecs", codecs: ["jpeg"] });
+    }
+  }
+
+  function decodeH264(u8, isKey) {
+    if (!decoder || decoder.state !== "configured") return;
+    if (!isKey && needKey) return;
+    // Se o aparelho ficou para trás, descarta tudo e pede um quadro-chave (evita acumular atraso).
+    if (decoder.decodeQueueSize > 8 && !isKey) {
+      decoder.reset();
+      lastConfig = null;
+      needKey = true;
+      send({ type: "keyframe-request" });
+      return;
+    }
+    const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+    const timestamp = Number(view.getBigUint64(1));
+    decoder.decode(new EncodedVideoChunk({ type: isKey ? "key" : "delta", timestamp, data: u8.subarray(9) }));
+    if (isKey) {
+      needKey = false;
+      decodeErrors = 0;
+    }
+  }
+
+  function handleBinary(buf) {
+    bytes += buf.byteLength;
+    const u8 = new Uint8Array(buf);
+    switch (u8[0]) {
+      case FRAME_JPEG:
+        enqueueJpeg(buf);
+        break;
+      case FRAME_H264_CONFIG:
+        codecLabel = "H.264";
+        configureH264(u8.subarray(1));
+        break;
+      case FRAME_H264_KEY:
+        decodeH264(u8, true);
+        break;
+      case FRAME_H264_DELTA:
+        decodeH264(u8, false);
+        break;
+    }
+  }
 
   // ---------- WebSocket ----------
 
@@ -130,12 +254,13 @@
 
     ws.onopen = () => {
       setStatus("Conectado. Aguardando o computador…", "warn");
+      needKey = true;
       sendResolution("hello");
     };
 
     ws.onmessage = (ev) => {
       if (typeof ev.data !== "string") {
-        enqueueFrame(ev.data);
+        handleBinary(ev.data);
         return;
       }
       let msg;
@@ -146,6 +271,7 @@
           receivedFrame = false;
           setStatus("Computador desconectado. Aguardando…", "warn");
         } else {
+          needKey = true;
           setStatus(receivedFrame ? "Transmitindo" : "Computador conectado. Aguardando imagem…", "ok");
         }
       }
@@ -207,5 +333,8 @@
 
   document.addEventListener("gesturestart", (e) => e.preventDefault()); // bloqueia zoom por pinça
 
-  connect();
+  probeH264().then((ok) => {
+    h264Supported = ok;
+    connect();
+  });
 })();

@@ -26,17 +26,16 @@ final class JPEGEncoder {
 
 /// Captura EXCLUSIVAMENTE o monitor virtual (pelo displayID) com ScreenCaptureKit.
 final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
-    /// Chamado na fila de captura com cada frame JPEG pronto.
-    var onFrame: ((Data) -> Void)?
+    /// Chamado na fila de captura com cada frame novo (só quando a tela mudou).
+    var onFrame: ((CVPixelBuffer, CMTime) -> Void)?
     /// Chamado quando o stream para por erro (ex.: permissão revogada).
     var onStop: ((Error) -> Void)?
 
     private var stream: SCStream?
     private let queue = DispatchQueue(label: "ronicmirror.capture", qos: .userInteractive)
-    private let encoder = JPEGEncoder(quality: 0.6)
     let fps: Int
 
-    init(fps: Int = 30) { self.fps = fps }
+    init(fps: Int = 60) { self.fps = fps }
 
     func start(displayID: CGDirectDisplayID, width: Int, height: Int) async throws {
         await stop()
@@ -74,7 +73,7 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
         c.pixelFormat = kCVPixelFormatType_32BGRA
         c.colorSpaceName = CGColorSpace.sRGB
         c.showsCursor = true
-        c.queueDepth = 3
+        c.queueDepth = 6
         return c
     }
 
@@ -85,10 +84,9 @@ final class ScreenCapturer: NSObject, SCStreamOutput, SCStreamDelegate {
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let rawStatus = attachments.first?[.status] as? Int,
               SCFrameStatus(rawValue: rawStatus) == .complete, // .idle = nada mudou na tela: não envia nada
-              let pixelBuffer = sampleBuffer.imageBuffer,
-              let jpeg = encoder.encode(pixelBuffer)
+              let pixelBuffer = sampleBuffer.imageBuffer
         else { return }
-        onFrame?(jpeg)
+        onFrame?(pixelBuffer, sampleBuffer.presentationTimeStamp)
     }
 
     // MARK: SCStreamDelegate

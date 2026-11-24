@@ -22,7 +22,7 @@ final class VirtualDisplay {
     init?(width: Int, height: Int) {
         let descriptor = CGVirtualDisplayDescriptor()
         descriptor.setDispatchQueue(DispatchQueue.main)
-        descriptor.name = "Ronic Mirror (iPad)"
+        descriptor.name = "Ronic Mirror"
         descriptor.maxPixelsWide = UInt32(Self.maxPixels)
         descriptor.maxPixelsHigh = UInt32(Self.maxPixels)
         // ~132 pontos por polegada (densidade típica de um iPad em pontos) -> tamanho físico aproximado.

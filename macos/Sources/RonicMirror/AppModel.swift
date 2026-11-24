@@ -39,7 +39,9 @@ final class AppModel: ObservableObject {
     private var display: VirtualDisplay?
     private let server = CoreServerProcess()
     private let source = SourceClient()
-    private let capturer = ScreenCapturer(fps: 30)
+    private let capturer = ScreenCapturer(fps: 60)
+    private lazy var router = FrameRouter(source: source, fps: capturer.fps)
+    @Published var codec = "JPEG"
     private var started = false
     private var captureGeneration = 0
     private var captureTask: Task<Void, Never>?
@@ -58,8 +60,8 @@ final class AppModel: ObservableObject {
         createDisplay()
 
         // Captura -> servidor (na fila de captura, sem passar pela main thread).
-        let source = self.source
-        capturer.onFrame = { data in source.sendFrame(data) }
+        let router = self.router
+        capturer.onFrame = { pixelBuffer, pts in router.handle(pixelBuffer, pts: pts) }
         capturer.onStop = { [weak self] error in
             Task { @MainActor in self?.captureFailed(error) }
         }
@@ -175,7 +177,7 @@ final class AppModel: ObservableObject {
 
     private func sendStreamInfo() {
         guard let display else { return }
-        source.sendJSON(["type": "stream-info", "codec": "jpeg", "width": display.width, "height": display.height, "fps": capturer.fps])
+        source.sendJSON(["type": "stream-info", "codec": router.currentCodec.rawValue, "width": display.width, "height": display.height, "fps": capturer.fps])
     }
 
     // MARK: Mensagens do servidor
@@ -186,6 +188,12 @@ final class AppModel: ObservableObject {
             if let urls = msg["urls"] as? [String] { applyURLs(urls) }
         case "viewers":
             viewers = msg["count"] as? Int ?? 0
+            let useH264 = msg["h264"] as? Bool ?? false
+            router.setCodec(useH264 ? .h264 : .jpeg)
+            codec = useH264 ? "H.264" : "JPEG"
+            sendStreamInfo()
+        case "keyframe-request":
+            router.requestKeyFrame()
         case "viewer-resolution":
             if let w = msg["width"] as? Int, let h = msg["height"] as? Int { resizeDisplay(width: w, height: h) }
         default:

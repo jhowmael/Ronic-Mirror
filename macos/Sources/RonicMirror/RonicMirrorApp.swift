@@ -58,14 +58,14 @@ struct MenuBarContent: View {
 
     var body: some View {
         Text(model.url)
-        Text(model.viewers == 1 ? "1 iPad conectado" : "\(model.viewers) iPads conectados")
+        Text(model.viewers == 1 ? "1 aparelho conectado" : "\(model.viewers) aparelhos conectados")
         Divider()
         Button("Abrir Ronic Mirror") {
             AppDelegate.showInDock(true)
             openWindow(id: "main")
         }
         Button("Copiar link") { model.copyURL() }
-        Picker("Posição do iPad", selection: $model.position) {
+        Picker("Posição do aparelho", selection: $model.position) {
             ForEach(DisplaySide.allCases) { side in Text(side.label).tag(side) }
         }
         Divider()

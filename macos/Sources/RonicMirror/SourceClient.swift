@@ -5,6 +5,8 @@ import Foundation
 final class SourceClient: NSObject, URLSessionWebSocketDelegate {
     var onMessage: (([String: Any]) -> Void)?   // main thread
     var onConnectionChange: ((Bool) -> Void)?   // main thread
+    /// A fila de vídeo transbordou (frames descartados): é preciso um novo quadro-chave. Qualquer thread.
+    var onOverflow: (() -> Void)?
 
     private var session: URLSession!
     private var task: URLSessionWebSocketTask?
@@ -13,7 +15,9 @@ final class SourceClient: NSObject, URLSessionWebSocketDelegate {
 
     private let lock = NSLock()
     private var isOpen = false
-    private var sending = false   // backpressure: no máximo 1 frame em trânsito; os demais são descartados
+    private var sending = false   // há uma mensagem binária em trânsito
+    private var queue: [Data] = [] // vídeo H.264: não pode perder frames, então enfileira em ordem
+    private static let maxQueue = 90
 
     override init() {
         super.init()
@@ -41,16 +45,49 @@ final class SourceClient: NSObject, URLSessionWebSocketDelegate {
         receive(on: t)
     }
 
-    /// Envia um frame se não houver outro em trânsito (latest-frame-wins). Thread-safe.
+    /// Vídeo H.264: envia em ordem. Se a fila crescer demais, descarta tudo e pede um quadro-chave. Thread-safe.
+    func sendOrdered(_ data: Data) {
+        lock.lock()
+        guard isOpen, let t = task else { lock.unlock(); return }
+        if queue.count >= Self.maxQueue {
+            queue.removeAll()
+            lock.unlock()
+            onOverflow?()
+            return
+        }
+        if sending {
+            queue.append(data)
+            lock.unlock()
+            return
+        }
+        sending = true
+        lock.unlock()
+        transmit(data, on: t)
+    }
+
+    private func transmit(_ data: Data, on t: URLSessionWebSocketTask) {
+        t.send(.data(data)) { [weak self] error in
+            guard let self else { return }
+            self.lock.lock()
+            if error == nil, !self.queue.isEmpty, t === self.task {
+                let next = self.queue.removeFirst()
+                self.lock.unlock()
+                self.transmit(next, on: t)
+            } else {
+                self.sending = false
+                self.queue.removeAll()
+                self.lock.unlock()
+            }
+        }
+    }
+
+    /// JPEG: envia só se não houver outro em trânsito (latest-frame-wins). Thread-safe.
     func sendFrame(_ data: Data) {
         lock.lock()
         guard isOpen, !sending, let t = task else { lock.unlock(); return }
         sending = true
         lock.unlock()
-        t.send(.data(data)) { [weak self] _ in
-            guard let self else { return }
-            self.lock.lock(); self.sending = false; self.lock.unlock()
-        }
+        transmit(data, on: t) // ao terminar, continua drenando a fila de vídeo (se houver), na ordem
     }
 
     func sendJSON(_ obj: [String: Any]) {
@@ -83,6 +120,7 @@ final class SourceClient: NSObject, URLSessionWebSocketDelegate {
         let wasOpen = isOpen
         isOpen = false
         sending = false
+        queue.removeAll()
         lock.unlock()
         if wasOpen { DispatchQueue.main.async { self.onConnectionChange?(false) } }
         guard !stopped else { return }

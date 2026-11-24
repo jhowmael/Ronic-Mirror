@@ -12,7 +12,7 @@ struct ContentView: View {
 
             if model.needsPermission { permissionBanner }
 
-            section("1. No iPad, abra no Safari") {
+            section("1. No iPad, tablet ou celular, abra no navegador") {
                 HStack(alignment: .center, spacing: 16) {
                     QRCodeView(text: model.url)
                         .frame(width: 96, height: 96)
@@ -33,7 +33,7 @@ struct ContentView: View {
                             .controlSize(.large)
                             .keyboardShortcut("c", modifiers: [.command, .shift])
                         }
-                        Text("Ou aponte a câmera do iPad para o QR code.")
+                        Text("Ou aponte a câmera do aparelho para o QR code.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -46,7 +46,7 @@ struct ContentView: View {
                 }
             }
 
-            section("2. Posição do iPad em relação ao Mac") {
+            section("2. Posição do aparelho em relação ao Mac") {
                 Picker("Posição", selection: $model.position) {
                     ForEach(DisplaySide.allCases) { side in
                         Text(side.label).tag(side)
@@ -60,12 +60,12 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 6) {
                     StatusRow(title: "Servidor local", status: model.serverStatus)
                     StatusRow(title: "Monitor virtual \(model.resolution)", status: model.displayStatus)
-                    StatusRow(title: "Captura de tela", status: model.captureStatus)
+                    StatusRow(title: "Captura de tela · \(model.codec) até 60 fps", status: model.captureStatus)
                     HStack(spacing: 8) {
-                        Image(systemName: "ipad.landscape")
+                        Image(systemName: "ipad.and.iphone")
                             .foregroundStyle(model.viewers > 0 ? .green : .secondary)
                             .frame(width: 14)
-                        Text(model.viewers == 1 ? "1 iPad conectado" : "\(model.viewers) iPads conectados")
+                        Text(model.viewers == 1 ? "1 aparelho conectado" : "\(model.viewers) aparelhos conectados")
                     }
                 }
                 .font(.callout)
@@ -88,7 +88,7 @@ struct ContentView: View {
                 .frame(width: 44, height: 44)
             VStack(alignment: .leading, spacing: 2) {
                 Text("Ronic Mirror").font(.title2.bold())
-                Text("Use o iPad como monitor estendido via Wi-Fi")
+                Text("Use o iPad, tablet ou celular como segundo monitor via Wi-Fi")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }

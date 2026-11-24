@@ -27,10 +27,10 @@
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>A Ronic Mirror usa a rede local para enviar a imagem do monitor virtual ao seu iPad.</string>
+	<string>A Ronic Mirror usa a rede local para enviar a imagem do monitor virtual ao seu iPad, tablet ou celular.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>NSScreenCaptureUsageDescription</key>
-	<string>A Ronic Mirror captura apenas o monitor virtual do iPad para transmiti-lo pela rede local.</string>
+	<string>A Ronic Mirror captura apenas o monitor virtual para transmiti-lo pela rede local.</string>
 </dict>
 </plist>
