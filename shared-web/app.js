@@ -502,7 +502,20 @@
 
   const TAP_MAX_MS = 350;
   const TAP_MAX_MOVE = 10; // px
-  const HOLD_MS = 450;
+  const HOLD_MS = 350;
+  const EDGE = 0.03; // na borda, o computador continua o arrasto para o monitor vizinho
+  const dragRing = document.getElementById("drag-ring");
+
+  function showRing(p, onEdge) {
+    dragRing.hidden = false;
+    dragRing.classList.toggle("edge", !!onEdge);
+    dragRing.style.transform = `translate3d(${p.x}px, ${p.y}px, 0)`;
+  }
+  function hideRing() { dragRing.hidden = true; }
+  function atEdge(p) {
+    const q = toScreen(p);
+    return q.x <= EDGE || q.x >= 1 - EDGE || q.y <= EDGE || q.y >= 1 - EDGE;
+  }
   let gesture = null;
 
   function centroid(touches) {
@@ -546,6 +559,7 @@
           if (gesture && gesture.mode === "none") {
             gesture.mode = "drag";
             sendInput("down", gesture.last);
+            showRing(gesture.last, false);
             if (navigator.vibrate) navigator.vibrate(12);
           }
         }, HOLD_MS);
@@ -571,6 +585,7 @@
       if (dx || dy) sendInput("scroll", c, { dx, dy });
     } else if (gesture.mode === "drag") {
       sendInput("move", c);
+      showRing(c, atEdge(c)); // amarelo = na borda: segure para levar ao outro monitor
     }
     gesture.last = c;
   }, { passive: false });
@@ -589,6 +604,7 @@
     } else if (gesture.mode === "drag") {
       sendInput("up", gesture.last);
     }
+    hideRing();
     gesture = null;
     if (!isFullscreen()) enterFullscreen();
     keepAwake();

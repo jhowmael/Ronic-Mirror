@@ -40,6 +40,24 @@ html, body {
   image-rendering: auto;
 }
 
+/* Anel que aparece sob o dedo quando o "segurar e arrastar" começa. */
+#drag-ring {
+  position: fixed;
+  left: 0;
+  top: 0;
+  width: 64px;
+  height: 64px;
+  margin: -32px 0 0 -32px;
+  border-radius: 50%;
+  border: 3px solid var(--accent);
+  background: rgba(34, 211, 238, 0.18);
+  box-shadow: 0 0 18px rgba(34, 211, 238, 0.6);
+  z-index: 6;
+  pointer-events: none;
+  will-change: transform;
+}
+#drag-ring.edge { border-color: #ffd60a; background: rgba(255, 214, 10, 0.22); }
+
 #retry {
   font: inherit;
   font-size: 15px;

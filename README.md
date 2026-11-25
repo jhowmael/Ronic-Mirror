@@ -77,7 +77,8 @@ Cada aparelho aceito ganha a **sua própria tela**, com o tamanho e o formato de
 | Tocar com 1 dedo | Clique esquerdo (dois toques rápidos = clique duplo) |
 | Tocar com 2 dedos | Clique direito |
 | Arrastar (1 ou 2 dedos) | Rolagem |
-| Segurar parado meio segundo e arrastar | Clicar e arrastar (mover janelas, selecionar texto) |
+| Segurar parado um instante e arrastar | Clicar e arrastar (mover janelas, selecionar texto). Aparece um anel sob o dedo |
+| Arrastando, **segurar o dedo na borda** | Leva o item para o monitor vizinho: o cursor atravessa sozinho (o anel fica amarelo). Solte o dedo e o item fica lá |
 | Tocar com 3 dedos | Mostrar ou esconder as estatísticas |
 
 No **macOS**, a primeira vez que você tocar, o sistema pede a permissão de **Acessibilidade** (Ajustes do Sistema › Privacidade e Segurança › Acessibilidade › RonicMirror). Ela é necessária para o app clicar por você. No **Windows**, não é preciso nada.

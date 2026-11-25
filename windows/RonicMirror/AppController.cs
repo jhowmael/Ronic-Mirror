@@ -441,17 +441,9 @@ internal sealed class AppController : IDisposable
     {
         if (conn == null || !_screenByConn.TryGetValue(conn, out var screen)) return;
         double Num(string name) => msg.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetDouble() : 0;
-        var p = screen.ToDesktop(Num("x"), Num("y"));
         var b = screen.Monitor.Bounds;
-        switch (msg.TryGetProperty("kind", out var k) ? k.GetString() : null)
-        {
-            case "tap": _input.Click(p, right: false); break;
-            case "rtap": _input.Click(p, right: true); break;
-            case "scroll": _input.Scroll(p, Num("dx") * b.Width, Num("dy") * b.Height); break;
-            case "down": _input.DragBegin(p); break;
-            case "move": _input.DragMove(p); break;
-            case "up": _input.DragEnd(p); break;
-        }
+        string kind = msg.TryGetProperty("kind", out var k) ? k.GetString() ?? "" : "";
+        _input.Handle(kind, b, Num("x"), Num("y"), Num("dx") * b.Width, Num("dy") * b.Height);
     }
 
     private void UpdateDevices(JsonElement list)

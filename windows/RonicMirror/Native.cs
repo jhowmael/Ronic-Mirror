@@ -226,4 +226,9 @@ internal static class Native
 
     [DllImport("user32.dll")]
     public static extern bool SetCursorPos(int x, int y);
+
+    public const uint MONITOR_DEFAULTTONULL = 0;
+
+    [DllImport("user32.dll")]
+    public static extern IntPtr MonitorFromPoint(POINT pt, uint dwFlags);
 }

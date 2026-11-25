@@ -24,7 +24,7 @@ import (
 	"time"
 )
 
-const version = "0.4.0"
+const version = "0.4.1"
 
 func main() {
 	port := flag.Int("port", 3000, "porta HTTP preferida (tenta as 10 seguintes se estiver ocupada)")
